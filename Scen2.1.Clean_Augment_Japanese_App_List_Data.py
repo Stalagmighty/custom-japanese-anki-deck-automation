@@ -2,6 +2,8 @@ import re
 import csv
 import hashlib
 from datetime import datetime
+from pathlib import Path
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from jisho_api.word import Word
@@ -17,10 +19,31 @@ import genanki
 
 # --- Open AI ---
 from openai import OpenAI
-import os
 
-os.environ["OPENAI_API_KEY"] = Path("lib/gpt_api_key.txt").read_text().strip()
-client = OpenAI()
+_client: OpenAI | None = None
+
+
+def get_openai_client() -> OpenAI:
+    """Lazy-load the OpenAI client using the key in lib/gpt_api_key.txt."""
+    global _client
+    if _client is None:
+        key_file = Path(__file__).resolve().parent / "lib" / "gpt_api_key.txt"
+        api_key = key_file.read_text(encoding="utf-8").strip()
+        _client = OpenAI(api_key=api_key)
+    return _client
+
+
+def generate_example_with_gpt(term: str) -> str:
+    """Return a short Japanese example sentence using the supplied term."""
+    client = get_openai_client()
+    prompt = f"Provide a short Japanese example sentence using the word '{term}'."
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=60,
+        temperature=0.7,
+    )
+    return resp.choices[0].message["content"].strip()
 
 
 # ------------- Parsing logic -------------
@@ -464,16 +487,24 @@ class App(tk.Tk):
             messagebox.showerror("Jisho error", str(e))
 
     # --------Enrich with GPT-created example sentence--------
-    def on_augment_with_gpt(term: str) -> str:
-        client = OpenAI()
-        prompt = f"Provide a short Japanese example sentence using the word '{term}'."
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=60,
-            temperature=0.7,
-        )
-        return resp.choices[0].message["content"].strip()
+    def on_augment_with_gpt(self):
+        if not self.rows:
+            messagebox.showinfo("Nothing to augment", "Parse first, then augment with GPT.")
+            return
+        try:
+            for row in self.rows:
+                term = row[0].strip()
+                try:
+                    example = generate_example_with_gpt(term)
+                except Exception:
+                    example = ""
+                row[3] = example
+                time.sleep(0.5)
+            self.refresh_table()
+            self.status.config(text=f"Augmented {len(self.rows)} rows with GPT.")
+            messagebox.showinfo("Done", "Augmented with GPT: example sentences.")
+        except Exception as e:
+            messagebox.showerror("GPT error", str(e))
 
     def on_make_anki(self):
         if not self.rows:
