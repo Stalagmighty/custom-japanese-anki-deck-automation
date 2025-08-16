@@ -63,7 +63,6 @@ def augment_row_with_jisho(term: str, reading_hint: str | None) -> list[str]:
 
     return [out_term, out_reading, meanings or "", example, jlpt]
 
-
 def split_meanings(s: str):
     """Split on commas not inside ASCII parentheses; keep semicolons as-is."""
     parts, current, depth = [], [], 0
