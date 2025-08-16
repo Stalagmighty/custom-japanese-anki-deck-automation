@@ -486,28 +486,33 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Jisho error", str(e))
 
-    # --------Enrich with GPT-created example sentence--------
-    def on_augment_with_gpt(self):
-        if not self.rows:
-            messagebox.showinfo("Nothing to augment", "Parse first, then augment with GPT.")
-            return
-        try:
-            for row in self.rows:
-                term = row[0].strip()
-                # ensure row has columns for Example and JLPT
-                if len(row) < 5:
-                    row.extend([""] * (5 - len(row)))
-                try:
-                    example = generate_example_with_gpt(term)
-                except Exception:
-                    example = ""
-                row[3] = example
-                time.sleep(0.5)
-            self.refresh_table()
-            self.status.config(text=f"Augmented {len(self.rows)} rows with GPT.")
-            messagebox.showinfo("Done", "Augmented with GPT: example sentences.")
-        except Exception as e:
-            messagebox.showerror("GPT error", str(e))
+# --------Enrich with GPT-created example sentence--------
+def on_augment_with_gpt(self):
+    if not self.rows:
+        messagebox.showinfo("Nothing to augment", "Parse first, then augment with GPT.")
+        return
+    try:
+        for row in self.rows:
+            term = (row[0] if len(row) > 0 else "").strip()
+
+            # ensure row has columns for [.., .., .., Example, JLPT]
+            if len(row) < 5:
+                row.extend([""] * (5 - len(row)))
+
+            try:
+                example = generate_example_with_gpt(term)
+            except Exception:
+                example = ""
+
+            # Example column assumed at index 3
+            row[3] = example
+            time.sleep(0.5)
+
+        self.refresh_table()
+        self.status.config(text=f"Augmented {len(self.rows)} rows with GPT.")
+        messagebox.showinfo("Done", "Augmented with GPT: example sentences.")
+    except Exception as e:
+        messagebox.showerror("GPT error", str(e))
 
     def on_make_anki(self):
         if not self.rows:
