@@ -151,6 +151,20 @@ def write_to_sheet(service, sheet_id: str, tab: str, rows: list,
         ).execute()
 
 
+def read_from_sheet(service, sheet_id: str, tab: str) -> list:
+    """Read Term/Reading/Meaning rows (columns A:C) from a sheet."""
+    values = service.spreadsheets().values().get(
+        spreadsheetId=sheet_id,
+        range=f"{tab}!A:C",
+    ).execute().get("values", [])
+    rows = []
+    for r in values[1:]:  # drop header row
+        padded = (r + ["", "", ""])[:3]
+        if any(c.strip() for c in padded):
+            rows.append(padded)
+    return rows
+
+
 def backup_raw(service, sheet_id: str, backup_tab: str, raw_text: str):
     ensure_sheet_exists(service, sheet_id, backup_tab)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -290,6 +304,7 @@ class App(tk.Tk):
         btns.grid(row=5, column=0, columnspan=6, sticky="w", pady=(10, 4))
         ttk.Button(btns, text="Parse", command=self.on_parse).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Save CSV…", command=self.on_save_csv).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Read from Google Sheet", command=self.on_read_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Write to Google Sheet", command=self.on_write_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Make Anki Deck…", command=self.on_make_anki).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Augment with Jisho", command=self.on_augment).pack(side=tk.LEFT, padx=4)
@@ -369,6 +384,25 @@ class App(tk.Tk):
             self.status.config(text=f"Saved CSV: {path}")
         except Exception as e:
             messagebox.showerror("Save error", str(e))
+
+    def on_read_sheet(self):
+        sa = self.sa_entry.get().strip()
+        sheet_id = self.sheet_entry.get().strip()
+        tab = self.tab_entry.get().strip()
+        if not (sa and sheet_id and tab):
+            messagebox.showwarning("Missing details",
+                                   "Please provide Service Account JSON path, Sheet ID, and Tab name.")
+            return
+        try:
+            svc = get_service(sa)
+            self.rows = read_from_sheet(svc, sheet_id, tab)
+            self.refresh_table()
+            self.status.config(text=f"Read {len(self.rows)} rows from {tab}.")
+            messagebox.showinfo("Done", f"Read {len(self.rows)} rows from '{tab}'.")
+        except HttpError as he:
+            messagebox.showerror("Google API error", str(he))
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
     def on_write_sheet(self):
         if not self.rows:
