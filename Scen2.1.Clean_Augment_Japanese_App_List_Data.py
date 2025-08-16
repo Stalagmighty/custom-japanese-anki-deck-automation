@@ -15,6 +15,14 @@ from googleapiclient.errors import HttpError
 # --- Anki ---
 import genanki
 
+# --- Open AI ---
+from openai import OpenAI
+import os
+
+os.environ["OPENAI_API_KEY"] = Path("lib/gpt_api_key.txt").read_text().strip()
+client = OpenAI()
+
+
 # ------------- Parsing logic -------------
 TERM_BLOCK_RE = re.compile(r'([^\s（]+)（([^）]+)）\s+(.+?)(?=\s+[^\s（]+（[^）]+）|\s*$)')
 
@@ -176,6 +184,8 @@ def backup_raw(service, sheet_id: str, backup_tab: str, raw_text: str):
         body={"values": [[ts, raw_text]]},
     ).execute()
 
+
+
 # ------------- Anki helpers -------------
 def stable_id(name: str) -> int:
     """Deterministic 32-bit int from a name (for deck/model IDs)."""
@@ -307,7 +317,8 @@ class App(tk.Tk):
         ttk.Button(btns, text="Read from Google Sheet", command=self.on_read_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Write to Google Sheet", command=self.on_write_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Make Anki Deck…", command=self.on_make_anki).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Augment with Jisho", command=self.on_augment).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Augment with Jisho", command=self.on_augment_with_jisho).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Augment with GPT", command=self.on_augment_with_gpt).pack(side=tk.LEFT, padx=4)
 
 
         # Status
@@ -436,7 +447,7 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    def on_augment(self):
+    def on_augment_with_jisho(self):
         if not self.rows:
             messagebox.showinfo("Nothing to augment", "Parse first, then augment with Jisho.")
             return
@@ -451,6 +462,18 @@ class App(tk.Tk):
             messagebox.showinfo("Done", "Augmented with Jisho: meanings, example, JLPT.")
         except Exception as e:
             messagebox.showerror("Jisho error", str(e))
+
+    # --------Enrich with GPT-created example sentence--------
+    def on_augment_with_gpt(term: str) -> str:
+        client = OpenAI()
+        prompt = f"Provide a short Japanese example sentence using the word '{term}'."
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=60,
+            temperature=0.7,
+        )
+        return resp.choices[0].message["content"].strip()
 
     def on_make_anki(self):
         if not self.rows:
