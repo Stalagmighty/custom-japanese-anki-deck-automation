@@ -9,11 +9,18 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from jisho_api.word import Word
 from jisho_api.sentence import Sentence
 import threading
-# top of file
+
+# THEMES
 try:
-    import sv_ttk  # pip install sv-ttk
+    import ttkbootstrap as tb
+except Exception:
+    tb = None
+
+try:
+    import sv_ttk
 except Exception:
     sv_ttk = None
+
 
 
 # --- Google APIs (optional if you only want CSV/Anki) ---
@@ -308,9 +315,11 @@ class App(tk.Tk):
         self.title("Japanese Vocab Parser → CSV / Google Sheets / Anki")
         self.geometry("1000x680")
 
-        # in App.__init__(), right after super().__init__()
-        if sv_ttk:
-            sv_ttk.set_theme("light")  # or "dark"
+        # Pick best-available theming
+        if tb:
+            tb.Style("darkly")  # nice light theme; try "darkly" for dark
+        elif sv_ttk:
+            sv_ttk.set_theme("dark")
         else:
             ttk.Style().theme_use("clam")
 
@@ -338,6 +347,8 @@ class App(tk.Tk):
         text_scroll = ttk.Scrollbar(top, orient="vertical", command=self.text.yview)
         text_scroll.grid(row=1, column=6, sticky="ns")
         self.text.configure(yscrollcommand=text_scroll.set)
+
+
 
         # Google config
         ttk.Label(top, text="Service Account JSON:").grid(row=2, column=0, sticky="w", pady=(2, 0))
