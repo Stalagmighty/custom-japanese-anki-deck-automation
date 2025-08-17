@@ -476,7 +476,7 @@ class App(tk.Tk):
         self.tree.column("Meaning", width=260, anchor="w", stretch=True)
         self.tree.column("Example", width=360, anchor="w", stretch=True)
         self.tree.column("JLPT", width=80, anchor="w", stretch=False)
-        self.tree.tag_configure("oddrow", background="#f6f7fb")
+        # self.tree.tag_configure("oddrow", background="#f6f7fb")
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll_y = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll_y.set)

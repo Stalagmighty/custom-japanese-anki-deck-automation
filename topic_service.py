@@ -130,9 +130,13 @@ class TopicGeneratorService:
             "Return unique items only; no duplicates within output.",
             "Do not include any pair present in 'avoid_pairs'.",
             "reading must be kana (hiragana/katakana).",
-            "example must be 1 short, natural Japanese sentence using the term.",
-            "meaning should be brief English.",
+            "example must be 1 short-medium, natural Japanese sentence using the term.",
+            "meaning should be brief English. Can have two or more meanings, or subtly different words "
+            "e.g., Harm, damage.",
             "jlpt is one of N5,N4,N3,N2,N1 or empty if unknown.",
+            "Try to create list of words based on knowledge base, however, can reference web articles and other"
+            "reputable sources if needed for inspiration.",
+            "If user states that they want a list of phrases, they will start topic with Phrases about."
         ]
         if attempt_index >= 3:
             guidance.append("Choose more specific or less common items still clearly within the topic.")

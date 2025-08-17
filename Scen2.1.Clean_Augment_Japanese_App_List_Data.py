@@ -1016,8 +1016,8 @@ class App(tk.Tk):
             self.tree.column("Example", width=360, anchor="w", stretch=True)
             self.tree.column("JLPT", width=80, anchor="w", stretch=False)
 
-            # zebra striping
-            self.tree.tag_configure("oddrow", background="#f6f7fb")  # light grey for readability
+            # # zebra striping
+            # self.tree.tag_configure("oddrow", background="#f6f7fb")  # light grey for readability
 
             # layout with vertical scrollbar
             self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
