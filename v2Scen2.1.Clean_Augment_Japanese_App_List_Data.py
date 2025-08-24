@@ -1,3 +1,6 @@
+# From English
+from From_English_Translate import translate_english_terms_batch
+
 # -*- coding: utf-8 -*-
 import re
 import csv
@@ -9,6 +12,11 @@ import os
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import scrolledtext
+import json
+import re
+from typing import Iterable, Dict, List
+from extractor import build_rows_from_text
 
 # Jisho
 from jisho_api.word import Word
@@ -17,6 +25,7 @@ from jisho_api.sentence import Sentence
 # Topic service + row merge util
 from topic_service import TopicGeneratorService
 from utils import merge_rows  # def merge_rows(existing_rows, new_rows) -> tuple
+
 
 # Themes (optional)
 try:
@@ -55,36 +64,248 @@ def get_openai_client() -> OpenAI:
         _client = OpenAI(api_key=api_key)
     return _client
 
-
-def generate_example_with_gpt(term: str) -> str:
-    """Return a short Japanese example sentence using the supplied term."""
-    client = get_openai_client()
-    prompt = (
-        f"Output ONLY one short natural Japanese example sentence using the word '{term}'. "
-        "Do not include translations, explanations, or any other text."
-    )
-    resp = client.chat.completions.create(
-        model="gpt-5",
-        messages=[...],
-        max_completion_tokens=100,  # ✅ correct param
-        temperature=1,
-    )
-
-    msg = resp.choices[0].message
-    text = getattr(msg, "content", "") or ""
+def _extract_json(text: str) -> str:
+    """
+    Try to pull a JSON array/object from a reply that might contain extra text
+    or be wrapped in ```json code fences.
+    """
+    if not text:
+        return "[]"
+    # Pull fenced ```json blocks first
+    m = re.search(r"```json\s*(.+?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # Otherwise try to find first JSON-looking segment
+    start = text.find("[")
+    if start != -1:
+        end = text.rfind("]")
+        if end != -1 and end > start:
+            return text[start:end + 1]
+    start = text.find("{")
+    if start != -1:
+        end = text.rfind("}")
+        if end != -1 and end > start:
+            return text[start:end + 1]
     return text.strip()
 
 
-# ---------------- Parsing helpers ----------------
-# Example block: 語（ご） meaning, meaning2 ...  語彙（ごい） next meanings ...
-TERM_BLOCK_RE = re.compile(
-    r'([^\s（]+)（([^）]+)）\s+(.+?)(?=\s+[^\s（]+（[^）]+）|\s*$)'
-)
+def _chunked(seq: Iterable, n: int):
+    """Yield lists of size n from seq."""
+    buf = []
+    for x in seq:
+        buf.append(x)
+        if len(buf) >= n:
+            yield buf
+            buf = []
+    if buf:
+        yield buf
 
-# Remove furigana in parentheses
+
+def generate_examples_with_gpt_batch(
+    terms: List[str],
+    *,
+    model: str = "gpt-4o-mini",
+    batch_size: int = 40,
+    max_tokens_per_batch: int = 900,   # longer sentences need a bit more room
+    retries: int = 2,
+) -> Dict[str, str]:
+    """
+    For each JP term, generate EXACTLY ONE medium-length, natural Japanese sentence
+    that *includes the exact term string*. Returns a dict {normalized_term: example}.
+    """
+    if not terms:
+        return {}
+
+    client = get_openai_client()
+    result: Dict[str, str] = {}
+
+    # Tighter, shared guidance (no English, ensure term presence, longer sentence)
+    sys_prompt = (
+        "You are a Japanese sentence generator. For each vocabulary item, "
+        "produce EXACTLY ONE natural Japanese sentence in Japanese that includes the term. "
+        "Target 60–110 Japanese characters (not words). Prefer context‑rich usage (news/academic/professional). "
+        "Return STRICT JSON only."
+    )
+
+    def _extract_text_any(resp) -> str:
+        """
+        Works for both Responses API and Chat Completions.
+        Tries: .output_text → responses.output[].content[].text.value → choices[0].message.content
+        """
+        # 1) New SDK convenience
+        t = getattr(resp, "output_text", None)
+        if t:
+            return t
+
+        # 2) Responses API canonical path
+        try:
+            out_chunks = []
+            for item in getattr(resp, "output", []) or []:
+                for c in getattr(item, "content", []) or []:
+                    tv = getattr(getattr(c, "text", None), "value", None)
+                    if tv:
+                        out_chunks.append(tv)
+            if out_chunks:
+                return "".join(out_chunks)
+        except Exception:
+            pass
+
+        # 3) Chat Completions
+        try:
+            return resp.choices[0].message.content or ""
+        except Exception:
+            return ""
+
+    def _chunked(seq: Iterable, n: int):
+        buf = []
+        for x in seq:
+            buf.append(x)
+            if len(buf) >= n:
+                yield buf
+                buf = []
+        if buf:
+            yield buf
+
+    for group in _chunked(terms, batch_size):
+        payload = {
+            "instructions": (
+                "Return a JSON array of objects with keys 'term' and 'example'. "
+                "Rules: the example MUST include the exact JP term string and be about 60–110 JP characters."
+            ),
+            "terms": group,
+        }
+
+        last_err = None
+        raw_reply = ""
+        for attempt in range(retries + 1):
+            try:
+                if model.startswith("gpt-5"):
+                    # Responses API (token arg name differs by SDK version).
+                    try:
+                        resp = client.responses.create(
+                            model=model,
+                            input=[
+                                {"role": "system", "content": sys_prompt},
+                                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                            ],
+                            max_output_tokens=max_tokens_per_batch,
+                        )
+                    except TypeError:
+                        resp = client.responses.create(
+                            model=model,
+                            input=[
+                                {"role": "system", "content": sys_prompt},
+                                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                            ],
+                        )
+                else:
+                    # Chat Completions
+                    resp = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                        ],
+                        max_tokens=max_tokens_per_batch,
+                    )
+
+                raw_reply = _extract_text_any(resp)  # <-- capture reply text
+                raw_json = _extract_json(raw_reply)
+                try:
+                    data = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    data = []
+
+                # accept either a list or {"items":[...]} or a single object
+                if isinstance(data, dict):
+                    data = data.get("items", data)
+                if not isinstance(data, list):
+                    data = [data]
+
+                wrote_any = False
+                for item in data:
+                    t = (item.get("term") or "").strip()
+                    ex = (item.get("example") or "").strip()
+                    if not t or not ex:
+                        continue
+                    # Enforce “example contains term” at client-side too.
+                    if t not in ex:
+                        continue
+                    result[remove_furigana(t)] = ex
+                    wrote_any = True
+                if wrote_any:
+                    break
+                else:
+                    # Force retry path if nothing usable parsed
+                    raise ValueError("Parsed zero usable items from batch.")
+            except Exception as e:
+                last_err = e
+                time.sleep(0.4 + 0.4 * attempt)
+
+        if last_err and not any(remove_furigana(t) in result for t in group):
+            snippet = (raw_reply[:240] + "…") if raw_reply else ""
+            # Don’t raise here — just continue so other batches still run
+            print(f"[GPT batch warn] group produced no items. reply snippet: {snippet}")
+
+        time.sleep(0.08)
+
+    return result
+
+JP_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+
+def pick_jp_term(term: str, reading: str) -> str:
+    term = (term or "").strip()
+    reading = (reading or "").strip()
+    # If the term has no JP chars but the reading does, use the reading
+    if not JP_RE.search(term) and JP_RE.search(reading):
+        return reading
+    return term
+
+
+def generate_example_with_gpt(term: str, model: str = "gpt-4o-mini") -> str:
+    """
+    Return a short Japanese example. Works across OpenAI SDK variants by
+    trying the Responses/Chat params that exist in the installed version.
+    """
+    client = get_openai_client()
+    prompt = (
+        f"Output ONLY one short-medium-length natural Japanese example sentence using the word '{term}'. "
+        "Do not include translations, explanations, or any other text."
+    )
+
+    def _extract_text_from_response(resp) -> str:
+        """
+        Safely extract text content from an OpenAI Responses/Chat API response.
+        Works across SDK variants.
+        """
+        # Newer SDKs expose .output_text directly
+        text = getattr(resp, "output_text", None)
+        if text:
+            return text
+
+        # Try choices[].message.content (Chat Completions style)
+        try:
+            return resp.choices[0].message.content or ""
+        except Exception:
+            pass
+
+        # Try newer Responses API shapes
+        try:
+            out = []
+            for item in getattr(resp, "output", []) or []:
+                for c in getattr(item, "content", []) or []:
+                    t = getattr(getattr(c, "text", None), "value", None)
+                    if t:
+                        out.append(t)
+            if out:
+                return "".join(out)
+        except Exception:
+            pass
+
+        return ""
+
+
 FURIGANA_RE = re.compile(r"\([^)]*\)")
-
-
 def remove_furigana(text: str) -> str:
     return FURIGANA_RE.sub("", text)
 
@@ -99,6 +320,56 @@ def top_two_non_wiki_meanings(w_data) -> str:
         if len(picked) >= 2:
             break
     return "; ".join(picked[:2]) if picked else ""
+
+class CollapsiblePane(ttk.Frame):
+    """A simple collapsible panel with a header toggle."""
+    def __init__(self, parent, title="Section", start_open=True, *args, **kwargs):
+        super().__init__(parent, *args, **kwargs)
+        self._open = bool(start_open)
+
+        # Header row
+        self._hdr = ttk.Frame(self)
+        self._hdr.pack(fill="x")
+
+        self._glyph = ttk.Label(self._hdr, width=2, anchor="w")
+        self._title = ttk.Label(self._hdr, text=title)
+
+        # Small button (optional, so focusable via keyboard)
+        self._btn = ttk.Button(
+            self._hdr, text="Toggle", command=self.toggle, width=1, style="Tool.TButton"
+        )
+
+        self._glyph.pack(side="left")
+        self._title.pack(side="left", padx=(2, 6))
+        self._btn.pack(side="right")
+
+        self.content = ttk.Frame(self)  # container for actual content
+        self._sync()
+
+        # Clicking the header also toggles
+        self._hdr.bind("<Button-1>", lambda e: self.toggle())
+        self._title.bind("<Button-1>", lambda e: self.toggle())
+        self._glyph.bind("<Button-1>", lambda e: self.toggle())
+
+    def toggle(self):
+        self._open = not self._open
+        self._sync()
+
+    def open(self):
+        self._open = True
+        self._sync()
+
+    def close(self):
+        self._open = False
+        self._sync()
+
+    def _sync(self):
+        self._glyph.config(text="▾" if self._open else "▸")
+        if self._open:
+            self.content.pack(fill="both", expand=True)
+        else:
+            self.content.forget()
+
 
 
 def fetch_example_sentence(term: str) -> str:
@@ -152,22 +423,32 @@ def split_meanings(s: str):
         parts.append(last)
     return parts
 
+# Matches entries like:  一般的（いっぱんてき） general, common, typical
+# …and also tolerates missing readings:  一般的  general, common
+TERM_BLOCK_RE = re.compile(r"""
+    \s*                                  # optional leading space
+    (?P<term>[^\s（）()]+)                # term (until space or bracket)
+    (?:\s*[（(](?P<reading>[^）)]+)[）)])? # optional reading in JP/ASCII parens
+    \s+                                  # at least one space
+    (?P<meaning>.+?)                     # meaning (lazy)
+    (?=                                  # stop when we see the next term…
+        \s+[^\s（）()]+(?:\s*[（(][^）)]+[）)])? # …optionally with reading…
+        \s+                              # …and a space
+      | \s*$                             # …or end of string
+    )
+""", re.VERBOSE | re.DOTALL)
+
 
 def parse_blob(text: str):
-    """
-    Return list of [Term, Reading, Meaning, Example, JLPT].
-    Example and JLPT are empty strings at parse time; the Jisho augment fills them later.
-    """
     text = re.sub(r"\s+", " ", text.strip())
     rows = []
     for m in TERM_BLOCK_RE.finditer(text):
-        term = m.group(1).strip()
-        reading = m.group(2).strip()
-        meanings_raw = m.group(3).strip()
+        term = m.group("term").strip()
+        reading = (m.group("reading") or "").strip()
+        meanings_raw = m.group("meaning").strip()
         meanings = ", ".join(split_meanings(meanings_raw))
-        rows.append([term, reading, meanings, "", ""])  # pad Example, JLPT
+        rows.append([term, reading, meanings, "", ""])  # Example, JLPT filled later
     return rows
-
 
 # ---------------- Google Sheets helpers ----------------
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -333,14 +614,14 @@ class App(tk.Tk):
         self.title("Japanese Vocab Parser → CSV / Google Sheets / Anki")
         self.geometry("1000x680")
 
+        self._enrich_running = False
+
         # --- Top controls bar ---
         controls_frame = ttk.Frame(self)
         controls_frame.pack(fill="x", padx=10, pady=6)
 
         # Topic service (reused)
-        self.topic_service = TopicGeneratorService(
-            augment_row_with_jisho=augment_row_with_jisho,
-        )
+        self.topic_service = TopicGeneratorService(augment_row_with_jisho=augment_row_with_jisho)
 
         # Theming
         if tb:
@@ -439,6 +720,8 @@ class App(tk.Tk):
         _add_btn("Write to Google Sheet⬆️", self.on_write_sheet)
         _add_btn("Make Anki Deck🃏", self.on_make_anki)
         _add_btn("Augment Examples✨", self.on_augment_examples)
+        _add_btn("From English → Rows", self.from_english_rows)
+        _add_btn("Extract from Text🧠", self.on_extract_from_text)
         _add_btn("Clear🧹", self.on_clear)
 
         # Source mode
@@ -460,6 +743,30 @@ class App(tk.Tk):
         # Status
         self.status = ttk.Label(top, text="Ready")
         self.status.grid(row=8, column=0, columnspan=6, sticky="w", pady=(8, 0))
+
+        # --- Progress bars ---
+        self.gen_pb = ttk.Progressbar(top, orient="horizontal", mode="determinate", maximum=100, length=240)
+        self.gen_pb.grid(row=8, column=4, sticky="e", padx=(8, 0))
+        ttk.Label(top, text="Gen").grid(row=8, column=3, sticky="e", padx=(16, 0))
+
+        self.enrich_pb = ttk.Progressbar(top, orient="horizontal", mode="determinate", maximum=100, length=240)
+        self.enrich_pb.grid(row=8, column=5, sticky="e")
+        ttk.Label(top, text="Enrich").grid(row=8, column=5, sticky="w", padx=(0, 8))
+
+        # --- Activity log (collapsible) ---
+        self.log_pane = CollapsiblePane(self, title="Activity log", start_open=False)
+        self.log_pane.pack(side=tk.TOP, fill=tk.BOTH, expand=False, padx=8, pady=(0, 8))
+
+        self.log_text = scrolledtext.ScrolledText(self.log_pane.content, height=8, wrap="word")
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.configure(state="disabled")
+
+        # optional: hotkey to toggle the pane
+        self.bind("<Control-Shift-L>", lambda e: self.log_pane.toggle())
+
+        # for safe shutdown / avoiding bgerror
+        self._closing = False
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Make text grow
         top.grid_columnconfigure(1, weight=1)
@@ -508,6 +815,26 @@ class App(tk.Tk):
         if path:
             self.sa_entry.delete(0, tk.END)
             self.sa_entry.insert(0, path)
+
+
+        def toggle(self):
+            self._open = not self._open
+            self._sync()
+
+        def open(self):
+            self._open = True
+            self._sync()
+
+        def close(self):
+            self._open = False
+            self._sync()
+
+        def _sync(self):
+            self._glyph.config(text="▾" if self._open else "▸")
+            if self._open:
+                self.content.pack(fill="both", expand=True)
+            else:
+                self.content.forget()
 
     def on_parse(self):
         raw = self.text.get("1.0", "end-1c")
@@ -623,7 +950,14 @@ class App(tk.Tk):
         threading.Thread(target=self._enrich_worker, args=(mode,), daemon=True).start()
 
     def _enrich_worker(self, mode: int):
-        """Run Jisho + GPT enrichment over self.rows."""
+        """Run Jisho + GPT enrichment over self.rows with progress bars."""
+
+        if self._enrich_running:
+            self._safe_after(0, self.log, "Enrichment already running; request ignored.", False)
+            self._safe_after(0, self._set_buttons_enabled, True)
+            return
+        self._enrich_running = True
+
         def ensure_width5(row):
             row = list(row)
             if len(row) < 5:
@@ -638,9 +972,12 @@ class App(tk.Tk):
             jisho_updates = 0
             gpt_updates = 0
 
-            # PASS 1: Jisho
+            # -------- PASS 1: Jisho --------
             if mode in (0, 2):
+                self._safe_after(0, self.log, f"Jisho pass starting… ({n} rows)")
                 for i, row in enumerate(self.rows):
+                    if self._closing:
+                        break
                     row = ensure_width5(row)
                     term = (row[0] if row else "").strip()
                     reading_hint = (row[1] if len(row) > 1 else "").strip() or None
@@ -648,49 +985,196 @@ class App(tk.Tk):
                         new_row = augment_row_with_jisho(term, reading_hint)
                         new_row = ensure_width5(new_row)
                     except Exception as e:
-                        print(f"[JISHO ENRICH ERROR] {term!r}: {e}")
+                        self._safe_after(0, self.log, f"[JISHO] {term!r}: {e}", False)
                         new_row = row
+
                     if self.only_fill_empty_var.get() and has_text(row[3]) and not has_text(new_row[3]):
                         new_row[3] = row[3]
-                    self.rows[i] = new_row
-                    jisho_updates += 1 if new_row != row else 0
-                    if i % 2 == 0:
-                        self.after(0, self.status.config, {
-                            "text": f"Jisho enrichment… {i + 1}/{n} (updated: {jisho_updates})"
-                        })
 
-            # PASS 2: GPT
-            if mode in (1, 2):
+                    changed = (new_row != row)
+                    self.rows[i] = new_row
+                    if changed:
+                        jisho_updates += 1
+
+                    if i % 2 == 0 or i == n - 1:
+                        self._safe_after(0, self._set_pb, self.enrich_pb, i + 1, n)
+                        self._safe_after(0, self.log,
+                                         f"Jisho {i + 1}/{n} (upd {jisho_updates})",
+                                         False)
+
+                self._safe_after(0, self.refresh_table)  # <— refresh table after Jisho pass
+
+            # Reset bar before GPT pass
+            self._safe_after(0, self._set_pb, self.enrich_pb, 0, 1)
+
+            # -------- PASS 2: GPT (BATCHED) --------
+            if mode in (1, 2) and not self._closing:
+                need_idxs: List[int] = []
+                need_terms: List[str] = []
+
                 for i, row in enumerate(self.rows):
                     row = ensure_width5(row)
                     term = (row[0] if row else "").strip()
+                    reading = (row[1] if len(row) > 1 else "").strip()
+                    meaning = (row[2] if len(row) > 2 else "").strip()
 
-                    if mode == 1 and self.only_fill_empty_var.get() and has_text(row[3]):
-                        continue
-                    need_gpt = (mode == 1) or (mode == 2 and not has_text(row[3]))
-                    if not need_gpt:
+                    if not term and not reading and not meaning:
                         continue
 
+                    # If Term is English (no JP chars), use Meaning; else use Term.
+                    # If Meaning is empty, fall back to Reading if it's JP.
+                    if term and not JP_RE.search(term):
+                        term_for_gen = meaning or (reading if JP_RE.search(reading) else term)
+                    else:
+                        term_for_gen = term or (reading if JP_RE.search(reading) else meaning)
+
+                    if mode == 1:
+                        if self.only_fill_empty_var.get() and (row[3] or "").strip():
+                            continue
+                        need_idxs.append(i)
+                        need_terms.append(term_for_gen)
+                    else:  # mode == 2 (Jisho → GPT): only if Example empty
+                        if not (row[3] or "").strip():
+                            need_idxs.append(i)
+                            need_terms.append(term_for_gen)
+
+                need_total = len(need_idxs)
+                done = 0
+                self._safe_after(0, self.log, f"GPT pass starting… ({need_total} rows need examples)")
+                self._safe_after(0, self._set_pb, self.enrich_pb, 0, max(1, need_total))
+
+                if need_total > 0 and not self._closing:
                     try:
-                        ex = (generate_example_with_gpt(term) or "").strip()
-                    except Exception as e:
-                        print(f"[GPT ERROR] {term!r}: {e}")
-                        ex = ""
+                        term_to_example = generate_examples_with_gpt_batch(
+                            need_terms,
+                            model="gpt-4o-mini",
+                            batch_size=20,
+                            max_tokens_per_batch=2000,  # ✅ correct kwarg
+                        )
 
-                    if ex:
-                        row[3] = ex
-                        self.rows[i] = row
-                        gpt_updates += 1
-                        preview = (ex[:18] + "…") if len(ex) > 20 else ex
-                        self.after(0, self.status.config, {
-                            "text": f"GPT pass… {gpt_updates} examples — '{preview}'"
-                        })
-                    time.sleep(0.25)
+                    except Exception as e:
+                        self._safe_after(0, self.log, f"[GPT batch] failed: {e}", False)
+                        term_to_example = {}
+
+                    # Build ordered fallback to handle term key drift
+                    ordered_fallback = []
+                    for t in need_terms:
+                        ordered_fallback.append(
+                            term_to_example.get(remove_furigana(t)) or term_to_example.get(t) or ""
+                        )
+
+                    if need_total > 0 and not self._closing and not term_to_example:
+                        self._safe_after(0, self.log, "[GPT batch] returned no usable items.", False)
+
+                    # Write back
+                    for j, (idx, term) in enumerate(zip(need_idxs, need_terms)):
+                        if self._closing:
+                            break
+                        ex = (term_to_example.get(remove_furigana(term))
+                              or term_to_example.get(term)
+                              or ordered_fallback[j] or "").strip()
+                        if ex:
+                            row = ensure_width5(self.rows[idx])
+                            row[3] = ex
+                            self.rows[idx] = row
+                            gpt_updates += 1
+                            preview = (ex[:18] + "…") if len(ex) > 20 else ex
+                            self._safe_after(0, self.log, f"GPT wrote: {preview}", False)
+                        done += 1
+                        self._safe_after(0, self._set_pb, self.enrich_pb, done, max(1, need_total))
+                        if done % 20 == 0 or done == need_total:
+                            self._safe_after(0, self.refresh_table)
+
+                    # final refresh
+                    self._safe_after(0, self.refresh_table)
+
+
         finally:
-            self.after(0, self.refresh_table)
-            self.after(0, self.status.config, {"text": "Augmentation complete."})
-            self.after(0, self._set_buttons_enabled, True)
-            self.after(0, messagebox.showinfo, "Done", "Examples augmented per selected mode.")
+            self._enrich_running = False
+            self._safe_after(0, self._set_buttons_enabled, True)
+
+    def _on_close(self):
+        """Mark as closing and destroy safely (prevents bgerror after window closes)."""
+        self._closing = True
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+    def _safe_after(self, delay_ms, func, *args, **kwargs):
+        """Only schedule UI updates if window still exists."""
+        if not self._closing and self.winfo_exists():
+            self.after(delay_ms, func, *args, **kwargs)
+
+    def log(self, msg: str, status: bool = True):
+        """Append a timestamped line to the log and print to console."""
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+        print(line.strip(), flush=True)
+        try:
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", line)
+            self.log_text.see("end")
+            self.log_text.configure(state="disabled")
+        except Exception:
+            pass
+        if status:
+            try:
+                self.status.config(text=msg)
+            except Exception:
+                pass
+
+    def _set_pb(self, bar: ttk.Progressbar, current: int, total: int):
+        """Update a progressbar deterministically (0–100)."""
+        try:
+            val = int(100 * (current / max(1, total)))
+            bar["value"] = max(0, min(100, val))
+            bar.update_idletasks()
+        except Exception:
+            pass
+
+    def _reset_progress(self):
+        for pb in (self.gen_pb, self.enrich_pb):
+            try:
+                pb["value"] = 0
+                pb.update_idletasks()
+            except Exception:
+                pass
+
+    def on_extract_from_text(self):
+        raw = self.text.get("1.0", "end-1c").strip()
+        if not raw:
+            messagebox.showinfo("No text", "Paste a Japanese article or any unstructured text first.")
+            return
+
+        try:
+            candidates_rows = build_rows_from_text(
+                raw,
+                top_k=int(self.topic_count_var.get() or 80),
+                min_freq=1,  # adjust if articles are long/short
+                allow_phrases=True,
+                max_ngram_len=3,
+            )
+        except Exception as e:
+            messagebox.showerror("Extract error", str(e))
+            return
+
+        if not candidates_rows:
+            messagebox.showinfo("Nothing found", "I couldn't extract useful terms.")
+            return
+
+        # merge with existing rows (you already have merge_rows)
+        try:
+            merged, added, updated, *_ = merge_rows(self.rows or [], candidates_rows)
+        except ValueError:
+            merged, added, updated = merge_rows(self.rows or [], candidates_rows)
+
+        self.rows = merged
+        self.refresh_table()
+        self.log(f"Extracted {len(candidates_rows)} items; appended {added}, updated {updated}.")
+
+        # optionally kick off Jisho → GPT enrichment
+        # self.start_enrichment_worker()
 
     # ----- Self-Service Topic Generator (unique & fills to requested count) -----
     def on_generate_from_topic(self):
@@ -703,11 +1187,11 @@ class App(tk.Tk):
         gpt_only = bool(self.gpt_only_var.get())
 
         self._set_buttons_enabled(False)
-        self.status.config(text=f"Generating {count} unique items for: {topic} …")
+        self._reset_progress()
+        self.log(f"Generating {count} unique items for: {topic} …")
 
         def run():
             try:
-                # Build avoid set (Term, Reading)
                 existing_keys = set()
                 for r in (self.rows or []):
                     term = (r[0] if len(r) > 0 else "").strip()
@@ -722,26 +1206,18 @@ class App(tk.Tk):
                 no_progress_rounds = 0
                 MAX_ROUNDS = 30
 
-                while len(new_rows) < target:
+                while len(new_rows) < target and not self._closing:
                     rounds += 1
                     needed = target - len(new_rows)
                     ask_for = max(needed, batch_size)
-                    self._pulse(f"[{rounds}] Requesting ~{ask_for} items (need {needed} more)…")
+                    self._safe_after(0, self.log, f"[Gen {rounds}] Asking service for ~{ask_for} (need {needed})…")
 
-                    # If TopicGeneratorService doesn't accept existing_keys, remove it.
-                    try:
-                        batch = self.topic_service.generate_rows(
-                            topic=topic,
-                            count=ask_for,
-                            gpt_only=gpt_only,
-                            existing_keys=existing_keys,
-                        )
-                    except TypeError:
-                        batch = self.topic_service.generate_rows(
-                            topic=topic,
-                            count=ask_for,
-                            gpt_only=gpt_only,
-                        )
+                    batch = self.topic_service.generate_rows(
+                        topic=topic,
+                        count=ask_for,
+                        gpt_only=gpt_only,
+                        existing_keys=existing_keys
+                    )
 
                     kept_before = len(new_rows)
                     for row in (batch or []):
@@ -752,7 +1228,6 @@ class App(tk.Tk):
                         key = (term, reading)
                         if key in existing_keys:
                             continue
-                        # de-dup within this run
                         if any(((r[0] if len(r) > 0 else "").strip(),
                                 (r[1] if len(r) > 1 else "").strip()) == key for r in new_rows):
                             continue
@@ -761,20 +1236,19 @@ class App(tk.Tk):
                         if len(new_rows) >= target:
                             break
 
-                    kept_now = len(new_rows)
-                    gained = kept_now - kept_before
-                    self._pulse(f"[{rounds}] Got {len(batch)}; kept {gained}; total {kept_now}/{target}")
+                    gained = len(new_rows) - kept_before
+                    self._safe_after(0, self._set_pb, self.gen_pb, len(new_rows), target)
+                    self._safe_after(0, self.log,
+                                     f"[Gen {rounds}] Got {len(batch)}; kept {gained}; total {len(new_rows)}/{target}",
+                                     False)
 
-                    if gained == 0:
-                        no_progress_rounds += 1
-                    else:
-                        no_progress_rounds = 0
+                    no_progress_rounds = no_progress_rounds + 1 if gained == 0 else 0
                     if no_progress_rounds >= 5:
                         raise RuntimeError("No progress after several rounds. The generator may be stuck.")
                     if rounds >= MAX_ROUNDS:
                         raise RuntimeError("Too many rounds while trying to reach requested count.")
 
-                # Merge/replace into table
+                # merge/replace
                 if self.append_var.get():
                     try:
                         merged, added, updated, *_ = merge_rows(self.rows or [], new_rows)
@@ -786,15 +1260,15 @@ class App(tk.Tk):
                     self.rows = new_rows
                     msg = f"Replaced with {len(new_rows)} rows."
 
-                self.after(0, self.refresh_table)
-                self._pulse(msg)
-                self.after(0, self.start_enrichment_worker)
+                self._safe_after(0, self.refresh_table)
+                self._safe_after(0, self.log, msg)
+                self._safe_after(0, self.start_enrichment_worker)
 
             except Exception as e:
-                self.after(0, messagebox.showerror, "Topic generation failed", str(e))
-                self._pulse("Topic generation failed.")
+                self._safe_after(0, messagebox.showerror, "Topic generation failed", str(e))
+                self._safe_after(0, self.log, "Topic generation failed.")
             finally:
-                self.after(0, self._set_buttons_enabled, True)
+                self._safe_after(0, self._set_buttons_enabled, True)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -805,6 +1279,60 @@ class App(tk.Tk):
             mode_value = 2
         self.status.config(text="Starting enrichment…")
         threading.Thread(target=self._enrich_worker, args=(mode_value,), daemon=True).start()
+
+    def from_english_rows(self):
+        """Translate English words/phrases in the big text box into JP rows (batched)."""
+        raw = (self.text.get("1.0", "end-1c") or "").strip()
+        if not raw:
+            messagebox.showinfo("Nothing to translate", "Paste English words/phrases first.")
+            return
+
+        # Split by newlines, commas, semicolons, tabs, or pipes
+        import re
+        parts = [p.strip() for p in re.split(r"[,\n;\t|]+", raw) if p.strip()]
+
+        # Keep items that look English (contain Latin letters)
+        english_terms = [p for p in parts if re.search(r"[A-Za-z]", p)]
+        if not english_terms:
+            messagebox.showwarning(
+                "No English terms found",
+                "I couldn’t find English items. Put one per line or comma-separated."
+            )
+            return
+
+        # Do the work in a thread
+        def run():
+            self._set_buttons_enabled(False)
+            self._safe_after(0, self.log, f"Translating {len(english_terms)} English items…")
+            try:
+                # Reload the translator module so edits take effect without restarting the app
+                import importlib
+                import From_English_Translate as FET
+                importlib.reload(FET)
+
+                rows = FET.translate_english_terms_batch(
+                    english_terms,
+                    model="gpt-4o-mini",
+                    batch_size=25,
+                    retries=2,
+                )
+                if not rows:
+                    self._safe_after(0, self.log, "Translator returned 0 rows.", False)
+                    messagebox.showerror("Translation failed", "Got no rows back from the model.")
+                    return
+
+                # Merge into table (append behavior like your other flows)
+                self.rows.extend(rows)
+                self._safe_after(0, self.refresh_table)
+                self._safe_after(0, self.log, f"Translated {len(rows)} rows from English input.")
+            except Exception as e:
+                msg = str(e)
+                self._safe_after(0, self.log, f"[EN→JP batch] {msg}", False)
+                messagebox.showerror("Translation failed", msg[:500])
+            finally:
+                self._safe_after(0, self._set_buttons_enabled, True)
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ----- Anki export -----
     def on_make_anki(self):

@@ -321,9 +321,7 @@ class App(tk.Tk):
 
 
         # 1) Create the service once and reuse
-        self.topic_service = TopicGeneratorService(
-            augment_row_with_jisho=augment_row_with_jisho,
-        )
+        self.topic_service = TopicGeneratorService(augment_row_with_jisho=augment_row_with_jisho)
 
         # Pick best-available theming
         if tb:
@@ -611,7 +609,7 @@ class App(tk.Tk):
             "Do not include translations, explanations, or any other text."
         )
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=60,
             temperature=0.7,
@@ -867,9 +865,7 @@ class App(tk.Tk):
             controls_frame.pack(fill="x", padx=10, pady=6)
 
             # 1) Create the service once and reuse
-            self.topic_service = TopicGeneratorService(
-                augment_row_with_jisho=augment_row_with_jisho,
-            )
+            self.topic_service = TopicGeneratorService(augment_row_with_jisho=augment_row_with_jisho)
 
             # Pick best-available theming
             if tb:
