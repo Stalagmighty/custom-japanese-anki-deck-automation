@@ -64,11 +64,12 @@ def generate_example_with_gpt(term: str) -> str:
         "Do not include translations, explanations, or any other text."
     )
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=60,
-        temperature=0.7,
+        model="gpt-5",
+        messages=[...],
+        max_completion_tokens=100,  # ✅ correct param
+        temperature=1,
     )
+
     msg = resp.choices[0].message
     text = getattr(msg, "content", "") or ""
     return text.strip()

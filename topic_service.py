@@ -22,8 +22,8 @@ class TopicGeneratorService:
         self,
         augment_row_with_jisho: Callable[[str, str | None], List[str]] | None = None,
         *,
-        model: str = "gpt-4o-mini",
-        temperature: float = 0.4,
+        model: str = "gpt-5",
+        temperature: float = 1,
         client: OpenAI | None = None,
     ):
         self.augment_row_with_jisho = augment_row_with_jisho
@@ -155,7 +155,9 @@ class TopicGeneratorService:
                 "term": "Kanji or kana headword",
                 "reading": "Hiragana or katakana reading",
                 "meaning": "Short English gloss",
-                "example": "One short Japanese sentence using the term",
+                "example": "One short-medium-length Japanese sentence using the term. Ideally these sentences"
+                           "should feel natural. Match the tone of the sentence to the word, for example"
+                           "business word example sentences should fit a business or governmental setting.",
                 "jlpt": "N5|N4|N3|N2|N1 or empty"
             }
         }
