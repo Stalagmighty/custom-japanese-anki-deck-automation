@@ -1,8 +1,6 @@
 # From English
 from From_English_Translate import translate_english_terms_batch
-
 # -*- coding: utf-8 -*-
-import re
 import csv
 import hashlib
 from datetime import datetime
@@ -59,7 +57,7 @@ def get_openai_client() -> OpenAI:
     if _client is None:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            key_file = Path(__file__).resolve().parent / ".venv" / "Lib" / "gpt_api_secret.txt"
+            key_file = Path(__file__).resolve().parent / ".venv" / "Lib" / "gpt_api_secret.txt" # Need to save own key
             api_key = key_file.read_text(encoding="utf-8").strip()
         _client = OpenAI(api_key=api_key)
     return _client
@@ -423,20 +421,21 @@ def split_meanings(s: str):
         parts.append(last)
     return parts
 
-# Matches entries like:  一般的（いっぱんてき） general, common, typical
-# …and also tolerates missing readings:  一般的  general, common
-TERM_BLOCK_RE = re.compile(r"""
+# Token that contains at least one Japanese char (Hiragana/Katakana/Kanji)
+JP_TOKEN = r"(?:[^\s（）()]*[\u3040-\u30FF\u3400-\u9FFF][^\s（）()]*)"
+
+TERM_BLOCK_RE = re.compile(rf"""
     \s*                                  # optional leading space
-    (?P<term>[^\s（）()]+)                # term (until space or bracket)
+    (?P<term>{JP_TOKEN})                 # JP term must include JP chars
     (?:\s*[（(](?P<reading>[^）)]+)[）)])? # optional reading in JP/ASCII parens
     \s+                                  # at least one space
     (?P<meaning>.+?)                     # meaning (lazy)
-    (?=                                  # stop when we see the next term…
-        \s+[^\s（）()]+(?:\s*[（(][^）)]+[）)])? # …optionally with reading…
-        \s+                              # …and a space
+    (?=                                  # stop when we see the next *JP* term…
+        \s+{JP_TOKEN}(?:\s*[（(][^）)]+[）)])?\s+  # next JP term (optional reading)
       | \s*$                             # …or end of string
     )
 """, re.VERBOSE | re.DOTALL)
+
 
 
 def parse_blob(text: str):
