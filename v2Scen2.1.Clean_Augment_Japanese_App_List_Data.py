@@ -1,6 +1,8 @@
 # From English
 from From_English_Translate import translate_english_terms_batch
+
 # -*- coding: utf-8 -*-
+import re
 import csv
 import hashlib
 from datetime import datetime
@@ -48,18 +50,57 @@ import genanki
 from openai import OpenAI
 
 # ---------------- OpenAI helpers ----------------
-_client = OpenAI()
-
+_client = None
 
 def get_openai_client() -> OpenAI:
-    """Lazy-load the OpenAI client (env var OPENAI_API_KEY or fallback file)."""
     global _client
-    if _client is None:
-        api_key = os.getenv("OPENAI_API_KEY")
+    if _client is not None:
+        return _client
+
+    # 1) Already in env?
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+
+    # 2) Otherwise, search common locations in THIS project
+    if not api_key:
+        here = Path(__file__).resolve().parent             # folder of this .py
+        root = here                                        # assume script is at project root
+        # If this file is inside a subfolder (e.g., src/ or app/), try its parent as root:
+        # root = here.parent
+
+        candidates = [
+            root / "OPENAI_API_KEY.txt",
+        ]
+
+        # Optional: honour a .env file if present
+        dot_env = root / ".env"
+        if dot_env.exists():
+            # simple manual read; avoids python-dotenv dependency
+            for line in dot_env.read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("OPENAI_API_KEY="):
+                    api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+
         if not api_key:
-            key_file = Path(__file__).resolve().parent / ".venv" / "Lib" / "gpt_api_secret.txt" # Need to save own key
-            api_key = key_file.read_text(encoding="utf-8").strip()
-        _client = OpenAI(api_key=api_key)
+            for p in candidates:
+                if p.exists():
+                    api_key = p.read_text(encoding="utf-8").strip()
+                    break
+
+        if not api_key:
+            tried = "\n  - " + "\n  - ".join(str(p) for p in candidates + ([dot_env] if dot_env.exists() else []))
+            raise FileNotFoundError(
+                "Could not find OPENAI_API_KEY. Set it in the environment or create one of:\n"
+                f"{tried}"
+            )
+
+    # 3) Validate + export to env so other modules (TopicService, translators) can see it
+    if not (api_key.startswith(("sk-", "sk-proj-"))):
+        raise ValueError("OPENAI_API_KEY looks malformed (expected to start with 'sk-' or 'sk-proj-').")
+    if any(c in api_key for c in (" ", "\t", "\n", "\r")):
+        raise ValueError("OPENAI_API_KEY contains whitespace/newlines; remove trailing characters.")
+
+    os.environ["OPENAI_API_KEY"] = api_key  # make visible process-wide
+    _client = OpenAI(api_key=api_key)
     return _client
 
 def _extract_json(text: str) -> str:
@@ -421,21 +462,20 @@ def split_meanings(s: str):
         parts.append(last)
     return parts
 
-# Token that contains at least one Japanese char (Hiragana/Katakana/Kanji)
-JP_TOKEN = r"(?:[^\s（）()]*[\u3040-\u30FF\u3400-\u9FFF][^\s（）()]*)"
-
-TERM_BLOCK_RE = re.compile(rf"""
+# Matches entries like:  一般的（いっぱんてき） general, common, typical
+# …and also tolerates missing readings:  一般的  general, common
+TERM_BLOCK_RE = re.compile(r"""
     \s*                                  # optional leading space
-    (?P<term>{JP_TOKEN})                 # JP term must include JP chars
+    (?P<term>[^\s（）()]+)                # term (until space or bracket)
     (?:\s*[（(](?P<reading>[^）)]+)[）)])? # optional reading in JP/ASCII parens
     \s+                                  # at least one space
     (?P<meaning>.+?)                     # meaning (lazy)
-    (?=                                  # stop when we see the next *JP* term…
-        \s+{JP_TOKEN}(?:\s*[（(][^）)]+[）)])?\s+  # next JP term (optional reading)
+    (?=                                  # stop when we see the next term…
+        \s+[^\s（）()]+(?:\s*[（(][^）)]+[）)])? # …optionally with reading…
+        \s+                              # …and a space
       | \s*$                             # …or end of string
     )
 """, re.VERBOSE | re.DOTALL)
-
 
 
 def parse_blob(text: str):
@@ -620,7 +660,12 @@ class App(tk.Tk):
         controls_frame.pack(fill="x", padx=10, pady=6)
 
         # Topic service (reused)
-        self.topic_service = TopicGeneratorService(augment_row_with_jisho=augment_row_with_jisho)
+        client = get_openai_client()  # ensures the key is loaded from file or env
+        self.topic_service = TopicGeneratorService(
+            augment_row_with_jisho=augment_row_with_jisho,
+            client=client,  # inject the working client
+            model="gpt-4o-mini",
+        )
 
         # Theming
         if tb:
@@ -1360,6 +1405,7 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Anki export error", str(e))
 
-
 if __name__ == "__main__":
+    get_openai_client()   # ensures OPENAI_API_KEY is set for TopicService / translator
     App().mainloop()
+

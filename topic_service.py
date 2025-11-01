@@ -76,18 +76,12 @@ class TopicGeneratorService:
     unique items that do NOT overlap `existing_keys` (term, reading).
     Optionally enriches via Jisho.
     """
-    def __init__(
-        self,
-        augment_row_with_jisho: Callable[[str, str | None], List[str]] | None = None,
-        *,
-        model: str = "gpt-4o-mini",
-        temperature: float = 1,
-        client: OpenAI | None = None,
-    ):
+
+    def __init__(self, augment_row_with_jisho=None, *, model="gpt-4o-mini", temperature=1.0, client=None):
         self.augment_row_with_jisho = augment_row_with_jisho
         self.model = model
         self.temperature = temperature
-        self.client = client or OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.client = client or OpenAI()  # ← fine, but won’t be used if you inject
 
     # ---------- PUBLIC -------------------------------------------------------
     def generate_rows(
