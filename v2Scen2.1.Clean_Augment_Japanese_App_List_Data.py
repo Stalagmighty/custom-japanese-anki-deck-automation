@@ -268,6 +268,7 @@ def generate_examples_with_gpt_batch(
                     if not t or not ex:
                         continue
                     # Enforce “example contains term” at client-side too.
+                    print(f"[DEBUG] t={t!r}  ex={ex!r}  found={t in ex}")
                     if t not in ex:
                         continue
                     result[remove_furigana(t)] = ex
@@ -478,15 +479,41 @@ TERM_BLOCK_RE = re.compile(r"""
 """, re.VERBOSE | re.DOTALL)
 
 
-def parse_blob(text: str):
-    text = re.sub(r"\s+", " ", text.strip())
+_TERM_LINE_RE = re.compile(
+    r"^(?P<term>[^\s（）()]+)\s*(?:[（(](?P<reading>[^）)]+)[）)])?\s*$"
+)
+
+def _parse_multiline(text: str):
+    """Parse the app-export format: Term（reading）\\nmeaning\\n\\nTerm…"""
     rows = []
-    for m in TERM_BLOCK_RE.finditer(text):
+    for block in re.split(r"\n\s*\n", text.strip()):
+        lines = [l.strip() for l in block.splitlines() if l.strip()]
+        if not lines:
+            continue
+        m = _TERM_LINE_RE.match(lines[0])
+        if not m:
+            continue
+        term = m.group("term").strip()
+        reading = (m.group("reading") or "").strip()
+        meaning = " ".join(lines[1:])
+        rows.append([term, reading, meaning, "", ""])
+    return rows
+
+
+def parse_blob(text: str):
+    # Try the multi-line app-export format first (term line + meaning line per block)
+    rows = _parse_multiline(text)
+    if rows:
+        return rows
+    # Fall back to the original single-line inline format
+    flat = re.sub(r"\s+", " ", text.strip())
+    rows = []
+    for m in TERM_BLOCK_RE.finditer(flat):
         term = m.group("term").strip()
         reading = (m.group("reading") or "").strip()
         meanings_raw = m.group("meaning").strip()
         meanings = ", ".join(split_meanings(meanings_raw))
-        rows.append([term, reading, meanings, "", ""])  # Example, JLPT filled later
+        rows.append([term, reading, meanings, "", ""])
     return rows
 
 # ---------------- Google Sheets helpers ----------------
