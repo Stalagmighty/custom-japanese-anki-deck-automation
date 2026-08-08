@@ -1,31 +1,27 @@
-# From English
-from From_English_Translate import translate_english_terms_batch
-# -*- coding: utf-8 -*-
+"""Tkinter front end.
+
+All pipeline logic lives in the sibling modules; this file is presentation and
+orchestration only.
+"""
+from __future__ import annotations
+
 import csv
-import hashlib
+import json
+import os
+import re
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
-import time
-import os
-import threading
+from typing import List
+
+import genanki
+from googleapiclient.errors import HttpError
+
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
-from tkinter import scrolledtext
-import json
-import re
-from typing import Iterable, Dict, List
-from extractor import build_rows_from_text
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
-# Jisho
-from jisho_api.word import Word
-from jisho_api.sentence import Sentence
-
-# Topic service + row merge util
-from topic_service import TopicGeneratorService
-from utils import merge_rows  # def merge_rows(existing_rows, new_rows) -> tuple
-
-
-# Themes (optional)
+# Optional theming
 try:
     import ttkbootstrap as tb
 except Exception:
@@ -36,288 +32,17 @@ try:
 except Exception:
     sv_ttk = None
 
-# Google APIs (optional)
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from anki_export import make_anki_deck
+from enrichment import generate_examples_with_gpt_batch
+from extractor import build_rows_from_text
+from From_English_Translate import translate_english_terms_batch
+from jisho_lookup import augment_row_with_jisho, parse_blob
+from openai_client import get_openai_client
+from sheets import backup_raw, get_service, read_from_sheet, write_to_sheet
+from text_utils import JP_RE, remove_furigana
+from topic_service import TopicGeneratorService
+from utils import merge_rows
 
-# Anki
-import genanki
-
-# OpenAI
-from openai import OpenAI
-
-# ---------------- OpenAI helpers ----------------
-_client = OpenAI()
-
-
-def get_openai_client() -> OpenAI:
-    """Lazy-load the OpenAI client (env var OPENAI_API_KEY or fallback file)."""
-    global _client
-    if _client is None:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            key_file = Path(__file__).resolve().parent / ".venv" / "Lib" / "gpt_api_secret.txt" # Need to save own key
-            api_key = key_file.read_text(encoding="utf-8").strip()
-        _client = OpenAI(api_key=api_key)
-    return _client
-
-def _extract_json(text: str) -> str:
-    """
-    Try to pull a JSON array/object from a reply that might contain extra text
-    or be wrapped in ```json code fences.
-    """
-    if not text:
-        return "[]"
-    # Pull fenced ```json blocks first
-    m = re.search(r"```json\s*(.+?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    # Otherwise try to find first JSON-looking segment
-    start = text.find("[")
-    if start != -1:
-        end = text.rfind("]")
-        if end != -1 and end > start:
-            return text[start:end + 1]
-    start = text.find("{")
-    if start != -1:
-        end = text.rfind("}")
-        if end != -1 and end > start:
-            return text[start:end + 1]
-    return text.strip()
-
-
-def _chunked(seq: Iterable, n: int):
-    """Yield lists of size n from seq."""
-    buf = []
-    for x in seq:
-        buf.append(x)
-        if len(buf) >= n:
-            yield buf
-            buf = []
-    if buf:
-        yield buf
-
-
-def generate_examples_with_gpt_batch(
-    terms: List[str],
-    *,
-    model: str = "gpt-4o-mini",
-    batch_size: int = 40,
-    max_tokens_per_batch: int = 900,   # longer sentences need a bit more room
-    retries: int = 2,
-) -> Dict[str, str]:
-    """
-    For each JP term, generate EXACTLY ONE medium-length, natural Japanese sentence
-    that *includes the exact term string*. Returns a dict {normalized_term: example}.
-    """
-    if not terms:
-        return {}
-
-    client = get_openai_client()
-    result: Dict[str, str] = {}
-
-    # Tighter, shared guidance (no English, ensure term presence, longer sentence)
-    sys_prompt = (
-        "You are a Japanese sentence generator. For each vocabulary item, "
-        "produce EXACTLY ONE natural Japanese sentence in Japanese that includes the term. "
-        "Target 60–110 Japanese characters (not words). Prefer context‑rich usage (news/academic/professional). "
-        "Return STRICT JSON only."
-    )
-
-    def _extract_text_any(resp) -> str:
-        """
-        Works for both Responses API and Chat Completions.
-        Tries: .output_text → responses.output[].content[].text.value → choices[0].message.content
-        """
-        # 1) New SDK convenience
-        t = getattr(resp, "output_text", None)
-        if t:
-            return t
-
-        # 2) Responses API canonical path
-        try:
-            out_chunks = []
-            for item in getattr(resp, "output", []) or []:
-                for c in getattr(item, "content", []) or []:
-                    tv = getattr(getattr(c, "text", None), "value", None)
-                    if tv:
-                        out_chunks.append(tv)
-            if out_chunks:
-                return "".join(out_chunks)
-        except Exception:
-            pass
-
-        # 3) Chat Completions
-        try:
-            return resp.choices[0].message.content or ""
-        except Exception:
-            return ""
-
-    def _chunked(seq: Iterable, n: int):
-        buf = []
-        for x in seq:
-            buf.append(x)
-            if len(buf) >= n:
-                yield buf
-                buf = []
-        if buf:
-            yield buf
-
-    for group in _chunked(terms, batch_size):
-        payload = {
-            "instructions": (
-                "Return a JSON array of objects with keys 'term' and 'example'. "
-                "Rules: the example MUST include the exact JP term string and be about 60–110 JP characters."
-            ),
-            "terms": group,
-        }
-
-        last_err = None
-        raw_reply = ""
-        for attempt in range(retries + 1):
-            try:
-                if model.startswith("gpt-5"):
-                    # Responses API (token arg name differs by SDK version).
-                    try:
-                        resp = client.responses.create(
-                            model=model,
-                            input=[
-                                {"role": "system", "content": sys_prompt},
-                                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                            ],
-                            max_output_tokens=max_tokens_per_batch,
-                        )
-                    except TypeError:
-                        resp = client.responses.create(
-                            model=model,
-                            input=[
-                                {"role": "system", "content": sys_prompt},
-                                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                            ],
-                        )
-                else:
-                    # Chat Completions
-                    resp = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": sys_prompt},
-                            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                        ],
-                        max_tokens=max_tokens_per_batch,
-                    )
-
-                raw_reply = _extract_text_any(resp)  # <-- capture reply text
-                raw_json = _extract_json(raw_reply)
-                try:
-                    data = json.loads(raw_json)
-                except json.JSONDecodeError:
-                    data = []
-
-                # accept either a list or {"items":[...]} or a single object
-                if isinstance(data, dict):
-                    data = data.get("items", data)
-                if not isinstance(data, list):
-                    data = [data]
-
-                wrote_any = False
-                for item in data:
-                    t = (item.get("term") or "").strip()
-                    ex = (item.get("example") or "").strip()
-                    if not t or not ex:
-                        continue
-                    # Enforce “example contains term” at client-side too.
-                    if t not in ex:
-                        continue
-                    result[remove_furigana(t)] = ex
-                    wrote_any = True
-                if wrote_any:
-                    break
-                else:
-                    # Force retry path if nothing usable parsed
-                    raise ValueError("Parsed zero usable items from batch.")
-            except Exception as e:
-                last_err = e
-                time.sleep(0.4 + 0.4 * attempt)
-
-        if last_err and not any(remove_furigana(t) in result for t in group):
-            snippet = (raw_reply[:240] + "…") if raw_reply else ""
-            # Don’t raise here — just continue so other batches still run
-            print(f"[GPT batch warn] group produced no items. reply snippet: {snippet}")
-
-        time.sleep(0.08)
-
-    return result
-
-JP_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
-
-def pick_jp_term(term: str, reading: str) -> str:
-    term = (term or "").strip()
-    reading = (reading or "").strip()
-    # If the term has no JP chars but the reading does, use the reading
-    if not JP_RE.search(term) and JP_RE.search(reading):
-        return reading
-    return term
-
-
-def generate_example_with_gpt(term: str, model: str = "gpt-4o-mini") -> str:
-    """
-    Return a short Japanese example. Works across OpenAI SDK variants by
-    trying the Responses/Chat params that exist in the installed version.
-    """
-    client = get_openai_client()
-    prompt = (
-        f"Output ONLY one short-medium-length natural Japanese example sentence using the word '{term}'. "
-        "Do not include translations, explanations, or any other text."
-    )
-
-    def _extract_text_from_response(resp) -> str:
-        """
-        Safely extract text content from an OpenAI Responses/Chat API response.
-        Works across SDK variants.
-        """
-        # Newer SDKs expose .output_text directly
-        text = getattr(resp, "output_text", None)
-        if text:
-            return text
-
-        # Try choices[].message.content (Chat Completions style)
-        try:
-            return resp.choices[0].message.content or ""
-        except Exception:
-            pass
-
-        # Try newer Responses API shapes
-        try:
-            out = []
-            for item in getattr(resp, "output", []) or []:
-                for c in getattr(item, "content", []) or []:
-                    t = getattr(getattr(c, "text", None), "value", None)
-                    if t:
-                        out.append(t)
-            if out:
-                return "".join(out)
-        except Exception:
-            pass
-
-        return ""
-
-
-FURIGANA_RE = re.compile(r"\([^)]*\)")
-def remove_furigana(text: str) -> str:
-    return FURIGANA_RE.sub("", text)
-
-
-def top_two_non_wiki_meanings(w_data) -> str:
-    picked = []
-    for sense in w_data.senses:
-        if "Wikipedia definition" in (sense.parts_of_speech or []):
-            continue
-        if sense.english_definitions:
-            picked.append(", ".join(sense.english_definitions))
-        if len(picked) >= 2:
-            break
-    return "; ".join(picked[:2]) if picked else ""
 
 class CollapsiblePane(ttk.Frame):
     """A simple collapsible panel with a header toggle."""
@@ -369,244 +94,6 @@ class CollapsiblePane(ttk.Frame):
             self.content.forget()
 
 
-
-def fetch_example_sentence(term: str) -> str:
-    try:
-        s_res = Sentence.request(term)
-        if s_res.data:
-            return remove_furigana(s_res.data[0].japanese)
-    except Exception:
-        pass
-    return ""
-
-
-def augment_row_with_jisho(term: str, reading_hint: str | None) -> list[str]:
-    """
-    Returns: [Term, Reading, Meaning(2 max, non-Wikipedia), Example, JLPT]
-    """
-    w_res = Word.request(term)
-    if not w_res.data and reading_hint:
-        w_res = Word.request(reading_hint)
-    if not w_res.data:
-        return [term, reading_hint or "", "", "", ""]
-
-    w = w_res.data[0]
-    jp0 = w.japanese[0]
-    out_term = jp0.word or jp0.reading or term
-    out_reading = jp0.reading or (reading_hint or "")
-    meanings = top_two_non_wiki_meanings(w)
-    example = fetch_example_sentence(term)
-    jlpt = ", ".join(w.jlpt) if w.jlpt else ""
-
-    return [out_term, out_reading, meanings or "", example, jlpt]
-
-
-def split_meanings(s: str):
-    """Split on commas not inside ASCII parentheses; keep semicolons as-is."""
-    parts, current, depth = [], [], 0
-    for ch in s:
-        if ch == '(':
-            depth += 1
-        elif ch == ')' and depth > 0:
-            depth -= 1
-        if ch == ',' and depth == 0:
-            part = ''.join(current).strip()
-            if part:
-                parts.append(part)
-            current = []
-        else:
-            current.append(ch)
-    last = ''.join(current).strip()
-    if last:
-        parts.append(last)
-    return parts
-
-# Token that contains at least one Japanese char (Hiragana/Katakana/Kanji)
-JP_TOKEN = r"(?:[^\s（）()]*[\u3040-\u30FF\u3400-\u9FFF][^\s（）()]*)"
-
-TERM_BLOCK_RE = re.compile(rf"""
-    \s*                                  # optional leading space
-    (?P<term>{JP_TOKEN})                 # JP term must include JP chars
-    (?:\s*[（(](?P<reading>[^）)]+)[）)])? # optional reading in JP/ASCII parens
-    \s+                                  # at least one space
-    (?P<meaning>.+?)                     # meaning (lazy)
-    (?=                                  # stop when we see the next *JP* term…
-        \s+{JP_TOKEN}(?:\s*[（(][^）)]+[）)])?\s+  # next JP term (optional reading)
-      | \s*$                             # …or end of string
-    )
-""", re.VERBOSE | re.DOTALL)
-
-
-
-def parse_blob(text: str):
-    text = re.sub(r"\s+", " ", text.strip())
-    rows = []
-    for m in TERM_BLOCK_RE.finditer(text):
-        term = m.group("term").strip()
-        reading = (m.group("reading") or "").strip()
-        meanings_raw = m.group("meaning").strip()
-        meanings = ", ".join(split_meanings(meanings_raw))
-        rows.append([term, reading, meanings, "", ""])  # Example, JLPT filled later
-    return rows
-
-# ---------------- Google Sheets helpers ----------------
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-
-
-def get_service(sa_json_path: str):
-    creds = service_account.Credentials.from_service_account_file(sa_json_path, scopes=SCOPES)
-    return build("sheets", "v4", credentials=creds)
-
-
-def ensure_sheet_exists(service, spreadsheet_id: str, title: str):
-    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-    if any(s.get("properties", {}).get("title") == title for s in meta.get("sheets", [])):
-        return
-    service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"addSheet": {"properties": {"title": title}}}]},
-    ).execute()
-
-
-def write_to_sheet(service, sheet_id: str, tab: str, rows: list,
-                   write_headers=True, clear_body=True):
-    """Write headers and rows; adapts to 3 or 5 columns based on data."""
-    values_api = service.spreadsheets().values()
-    width = max(len(r) for r in rows) if rows else 3
-    if width >= 5:
-        headers = ["Term", "Reading", "Meaning", "Example", "JLPT"]
-        header_range = f"{tab}!A1:E1"
-        clear_range = f"{tab}!A2:E"
-        write_start = f"{tab}!A2"
-    else:
-        headers = ["Term", "Reading", "Meaning"]
-        header_range = f"{tab}!A1:C1"
-        clear_range = f"{tab}!A2:C"
-        write_start = f"{tab}!A2"
-
-    if write_headers:
-        values_api.update(
-            spreadsheetId=sheet_id,
-            range=header_range,
-            valueInputOption="USER_ENTERED",
-            body={"values": [headers]},
-        ).execute()
-    if clear_body:
-        values_api.clear(spreadsheetId=sheet_id, range=clear_range).execute()
-    if rows:
-        padded = [(r + ["", "", ""])[:len(headers)] for r in rows]
-        values_api.update(
-            spreadsheetId=sheet_id,
-            range=write_start,
-            valueInputOption="USER_ENTERED",
-            body={"values": padded},
-        ).execute()
-
-
-def read_from_sheet(service, sheet_id: str, tab: str) -> list:
-    """Read Term/Reading/Meaning rows (columns A:E) from a sheet."""
-    values = service.spreadsheets().values().get(
-        spreadsheetId=sheet_id,
-        range=f"{tab}!A:E",
-    ).execute().get("values", [])
-    rows = []
-    for r in values[1:]:  # drop header row
-        padded = (r + ["", "", ""])[:5]
-        if any(c.strip() for c in padded):
-            rows.append(padded)
-    return rows
-
-
-def backup_raw(service, sheet_id: str, backup_tab: str, raw_text: str):
-    ensure_sheet_exists(service, sheet_id, backup_tab)
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    service.spreadsheets().values().append(
-        spreadsheetId=sheet_id,
-        range=f"{backup_tab}!A:B",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [[ts, raw_text]]},
-    ).execute()
-
-
-# ---------------- Anki helpers ----------------
-def stable_id(name: str) -> int:
-    """Deterministic 32-bit int from a name (for deck/model IDs)."""
-    return int(hashlib.sha1(name.encode("utf-8")).hexdigest()[:8], 16)
-
-
-def make_anki_deck(rows: list, deck_name: str):
-    """
-    Build a genanki.Deck from rows = [[Term, Reading, Meaning, Example, JLPT], ...].
-    Uses a model with 6 fields: Term, Reading, Meaning, Example, JLPT, Date.
-    """
-    deck_id = stable_id(deck_name)
-    model_name = "JP Vocab Basic v3"
-    model_id = stable_id(model_name)
-
-    model = genanki.Model(
-        model_id=model_id,
-        name=model_name,
-        fields=[
-            {"name": "Term"},
-            {"name": "Reading"},
-            {"name": "Meaning"},
-            {"name": "Example"},
-            {"name": "JLPT"},
-            {"name": "Date"},
-        ],
-        templates=[
-            {
-                "name": "Card 1",
-                "qfmt": """
-<div style="display:flex;align-items:center;justify-content:center;min-height:65vh;font-size:60px;font-weight:700;">
-  {{Term}}
-</div>
-                """,
-                "afmt": """
-<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:65vh;padding:10px;color:#fff !important;">
-  <div style="font-size:60px;font-weight:700;">{{Term}}</div>
-  <div style="font-size:34px;margin-top:10px;">{{Reading}}</div>
-  <hr style="width:100%;border:none;border-top:1px solid #aaa;margin:16px 0;">
-  <div style="font-size:28px;line-height:1.4;text-align:center;max-width:900px;">
-    {{Meaning}}
-  </div>
-  {{#Example}}
-  <div style="margin-top:16px;font-size:24px;line-height:1.4;text-align:center;max-width:900px;">
-    <b>Example:</b> {{Example}}
-  </div>
-  {{/Example}}
-  {{#JLPT}}
-  <div style="margin-top:12px;font-size:18px;color:#ddd;">
-    JLPT: {{JLPT}}
-  </div>
-  {{/JLPT}}
-  <div style="font-size:14px;color:#eaeaea;margin-top:16px;">
-    Added: {{Date}}
-  </div>
-</div>
-"""
-            }
-        ],
-    )
-
-    deck = genanki.Deck(deck_id=deck_id, name=deck_name)
-    today = datetime.today().strftime("%Y-%m-%d")
-
-    for row in rows:
-        term, reading, meaning, example, jlpt = (row + ["", "", ""])[:5]
-        guid = genanki.guid_for(f"v3|{term}|{reading}")  # version tag to avoid collision
-        note = genanki.Note(
-            model=model,
-            fields=[term, reading, meaning, example, jlpt, today],
-            guid=guid,
-        )
-        deck.add_note(note)
-
-    return deck
-
-
-# ---------------- GUI ----------------
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -620,7 +107,12 @@ class App(tk.Tk):
         controls_frame.pack(fill="x", padx=10, pady=6)
 
         # Topic service (reused)
-        self.topic_service = TopicGeneratorService(augment_row_with_jisho=augment_row_with_jisho)
+        client = get_openai_client()  # ensures the key is loaded from file or env
+        self.topic_service = TopicGeneratorService(
+            augment_row_with_jisho=augment_row_with_jisho,
+            client=client,  # inject the working client
+            model="gpt-4o-mini",
+        )
 
         # Theming
         if tb:
@@ -1360,6 +852,6 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Anki export error", str(e))
 
-
 if __name__ == "__main__":
+    get_openai_client()   # ensures OPENAI_API_KEY is set for TopicService / translator
     App().mainloop()

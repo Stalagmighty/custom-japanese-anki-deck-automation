@@ -1,0 +1,15 @@
+# Secrets — never commit these
+OPENAI_API_KEY.txt
+.env
+secrets/
+*.json
+
+# IDE — PyCharm stores run-config env vars in workspace.xml
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
