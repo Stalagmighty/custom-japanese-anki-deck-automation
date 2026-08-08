@@ -1,0 +1,21 @@
+# Japanese morphological analysis
+fugashi==1.5.1
+unidic-lite==1.0.8
+
+# Dictionary lookup
+jisho-api==0.1.8
+requests==2.32.4
+
+# Enrichment
+openai==2.6.1
+
+# Google Sheets export
+google-api-python-client==2.178.0
+google-auth==2.40.3
+
+# Anki deck generation
+genanki==0.13.1
+
+# Optional GUI theming — the app falls back to stock Tkinter if absent
+ttkbootstrap==1.14.2
+# sv-ttk
