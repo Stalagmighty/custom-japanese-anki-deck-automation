@@ -30,13 +30,31 @@ English terms ─────┘      │                             │
 | --- | --- | --- |
 | Extract | `extractor.py` | Morphological analysis of raw Japanese via fugashi/unidic-lite — filters to nouns, verbs and adjectives, lemmatises verbs, ranks by frequency and length, and pulls out noun compounds and n-gram phrases |
 | Translate | `From_English_Translate.py` | Batch English → Japanese, for when I know the concept but not the word |
-| Look up | `Call_Jisho_API.py` | Dictionary readings, meanings and example sentences |
+| Look up | `jisho-api` | Dictionary readings, meanings and example sentences |
 | Tag | `topic_service.py` | Groups terms into topics so a deck can be studied thematically |
 | Store | Google Sheets API | The working table — editable on a phone, with a raw-text backup tab |
 | Export | `genanki` | A ready-to-import deck |
 
-The GUI is Tkinter (`v2Scen2.1.Clean_Augment_Japanese_App_List_Data.py`), with
-optional `ttkbootstrap` / `sv_ttk` theming if either is installed.
+## Layout
+
+```
+main.py            entry point
+gui.py             Tkinter front end — presentation and orchestration only
+  ├── openai_client.py   key resolution + response/JSON extraction
+  ├── enrichment.py      batched GPT example-sentence generation
+  ├── jisho_lookup.py    dictionary lookups + parsing pasted/exported vocab
+  ├── text_utils.py      pure string helpers
+  ├── sheets.py          Google Sheets read/write/backup
+  ├── anki_export.py     deck construction
+  ├── extractor.py       morphological analysis of raw Japanese
+  ├── topic_service.py   topic tagging
+  └── utils.py           row merging
+scripts/           standalone tools, not part of the pipeline
+smoke_test.py      offline checks — no network, no keys, no GUI
+```
+
+The GUI uses optional `ttkbootstrap` / `sv_ttk` theming if either is installed,
+and falls back to stock Tkinter otherwise.
 
 ## Notes on a few decisions
 
@@ -85,14 +103,26 @@ Google Sheets export additionally needs a GCP service account JSON with the
 Sheets API enabled. Point the app at it from the GUI. `*.json` is gitignored.
 
 ```bash
-python v2Scen2.1.Clean_Augment_Japanese_App_List_Data.py
+python main.py
 ```
+
+To check an install without touching the network or needing an API key:
+
+```bash
+python smoke_test.py
+```
+
+## Known gaps
+
+`remove_furigana` strips ASCII `(...)` only — full-width Japanese `（...）` are
+left intact. The app-export parser handles both bracket styles, so a reading in
+full-width brackets can survive into a card field. Asserted in `smoke_test.py`
+as current behaviour rather than silently changed, since fixing it would alter
+existing rows.
 
 ## Status
 
-A personal project, not a product. It does what I need it to do; the main script
-has grown past the point where it should be one file, and splitting the GUI out
-from the pipeline is the obvious next change.
+A personal project, not a product.
 
 ## Built with
 
