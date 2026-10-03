@@ -17,10 +17,12 @@ from tkinter import font as tkfont
 
 import genanki
 
-try:  # optional theming
+try:  # optional theming; without it the built-in dark theme below is used
     import ttkbootstrap as tb
-except Exception:
+    TB_ERROR = ""
+except Exception as e:
     tb = None
+    TB_ERROR = f"{type(e).__name__}: {e}"
 
 import pipeline
 import sheets
@@ -28,6 +30,7 @@ from anki_export import make_anki_deck
 from jisho_lookup import parse_blob
 from models import STORAGE_HEADERS, Row, merge_rows
 from settings import Settings
+from text_utils import split_english_terms
 
 # (Row attribute, heading, width) in display order
 COLUMNS = [
@@ -46,11 +49,9 @@ SOURCES = {
 JP_FONTS = ("Yu Gothic UI", "Meiryo UI", "Meiryo", "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans JP")
 SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 
-
-def split_terms(text: str) -> list[str]:
-    """English terms from free text: one per line, or separated by , ; | or tabs."""
-    parts = (p.strip() for p in re.split(r"[\n,;\t|]+", text))
-    return [p for p in parts if p and re.search(r"[A-Za-z]", p)]
+# Colours for the built-in dark theme, matched to ttkbootstrap's "darkly"
+BG, SURFACE, FIELD, BORDER = "#222222", "#303030", "#2b2b2b", "#444444"
+FG, MUTED, ACCENT, ACCENT_HOVER = "#ffffff", "#8a8a8a", "#375a7f", "#4a72a0"
 
 
 class App(tk.Tk):
@@ -78,6 +79,8 @@ class App(tk.Tk):
         self.bind("<Control-l>", lambda e: self.show_log())
         self.after(100, self._drain_events)
         self.refresh_table()
+        if TB_ERROR:
+            self.log(f"ttkbootstrap couldn't be loaded ({TB_ERROR}); using the built-in dark theme.")
 
     # ================================================================ layout
 
@@ -85,7 +88,7 @@ class App(tk.Tk):
         if tb:
             tb.Style("darkly")
         else:
-            ttk.Style().theme_use("clam")
+            self._apply_dark_theme()
         families = set(tkfont.families(self))
         family = next((f for f in JP_FONTS if f in families), None)
         base = tkfont.nametofont("TkDefaultFont")
@@ -94,12 +97,54 @@ class App(tk.Tk):
         base.configure(size=10)
         for name in ("TkTextFont", "TkHeadingFont", "TkMenuFont"):
             tkfont.nametofont(name).configure(family=base.cget("family"), size=10)
+        self.option_add("*Text.font", "TkTextFont")  # tk.Text otherwise defaults to a monospace font
         style = ttk.Style()
         style.configure("Step.TLabel", font=(base.cget("family"), 13, "bold"))
         style.configure("Hint.TLabel", font=(base.cget("family"), 9))
         self._accent = "primary.TButton" if tb else "Accent.TButton"
-        if not tb:
-            style.configure("Accent.TButton", font=(base.cget("family"), 10, "bold"))
+
+    def _apply_dark_theme(self):
+        """Dark theme on top of Tk's built-in "clam", for when ttkbootstrap isn't available."""
+        style = ttk.Style()
+        style.theme_use("clam")
+        self.configure(background=BG)
+        style.configure(".", background=BG, foreground=FG, fieldbackground=FIELD, bordercolor=BORDER,
+                        lightcolor=BG, darkcolor=BG, troughcolor=FIELD, focuscolor=ACCENT,
+                        selectbackground=ACCENT, selectforeground=FG, insertcolor=FG, arrowcolor=FG)
+        style.map(".", foreground=[("disabled", MUTED)])
+        style.configure("TButton", background=SURFACE, bordercolor=BORDER, padding=(8, 4))
+        style.map("TButton", background=[("disabled", BG), ("pressed", BORDER), ("active", BORDER)])
+        style.configure("Accent.TButton", background=ACCENT, bordercolor=ACCENT)
+        style.map("Accent.TButton", background=[("disabled", BG), ("pressed", ACCENT), ("active", ACCENT_HOVER)])
+        for widget in ("TEntry", "TSpinbox", "TCombobox"):
+            style.configure(widget, fieldbackground=FIELD, foreground=FG, insertcolor=FG)
+        style.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", FG)],
+                  selectbackground=[("readonly", FIELD)])
+        style.configure("TCheckbutton", indicatorbackground=FIELD, indicatorforeground=FG)
+        style.map("TCheckbutton", indicatorbackground=[("selected", ACCENT)], background=[("active", BG)])
+        style.configure("TNotebook", background=BG, bordercolor=BORDER)
+        style.configure("TNotebook.Tab", background=SURFACE, foreground=FG, padding=(10, 4))
+        style.map("TNotebook.Tab", background=[("selected", ACCENT), ("active", BORDER)])
+        style.configure("TLabelframe", background=BG, bordercolor=BORDER)
+        style.configure("TLabelframe.Label", background=BG, foreground=FG)
+        style.configure("Treeview", background=FIELD, fieldbackground=FIELD, foreground=FG, bordercolor=BORDER)
+        style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", FG)])
+        style.configure("Treeview.Heading", background=SURFACE, foreground=FG, bordercolor=BORDER)
+        style.map("Treeview.Heading", background=[("active", BORDER)])
+        style.configure("TProgressbar", background=ACCENT, troughcolor=FIELD, bordercolor=BORDER)
+        style.configure("TScrollbar", background=SURFACE, troughcolor=BG, bordercolor=BG)
+        style.map("TScrollbar", background=[("active", BORDER)])
+        style.configure("TPanedwindow", background=BG)
+        # Classic Tk widgets (text boxes, menus, dropdown lists, dialogs) read the option database
+        for pattern, value in [
+            ("*Text.background", FIELD), ("*Text.foreground", FG), ("*Text.insertBackground", FG),
+            ("*Text.selectBackground", ACCENT), ("*Text.highlightBackground", BORDER),
+            ("*Text.highlightColor", ACCENT), ("*Menu.background", SURFACE), ("*Menu.foreground", FG),
+            ("*Menu.activeBackground", ACCENT), ("*Menu.activeForeground", FG),
+            ("*TCombobox*Listbox.background", FIELD), ("*TCombobox*Listbox.foreground", FG),
+            ("*TCombobox*Listbox.selectBackground", ACCENT), ("*Toplevel.background", BG),
+        ]:
+            self.option_add(pattern, value)
 
     def _build_menu(self):
         bar = tk.Menu(self)
@@ -162,8 +207,8 @@ class App(tk.Tk):
 
         tab = ttk.Frame(self.inputs, padding=10)
         self.inputs.add(tab, text="Vocab list")
-        self._hint(tab, "Paste entries like 一般的（いっぱんてき） general, common — "
-                        "one per line, or an export from a vocab app.")
+        self._hint(tab, "Paste a Jisho export (一般的（いっぱんてき） general, common 岐路（きろ） "
+                        "crossroads …) or an English word list, one term per line.")
         self.list_text = self._text_box(tab)
         self._action(tab, "Add to table", self.on_parse, accent=True).pack(anchor="e")
 
@@ -448,12 +493,16 @@ class App(tk.Tk):
     def on_parse(self):
         rows = parse_blob(self.list_text.get("1.0", "end-1c"))
         if not rows:
-            messagebox.showwarning("Nothing found", "No entries found. Expected lines like: 語（ご） word")
+            messagebox.showwarning("Nothing found", "No entries found. Paste a Jisho export "
+                                   "(語（ご） word …) or an English word list.")
             return
         self._add_rows(rows, "Vocab list")
+        if all(r.is_english for r in rows) and messagebox.askyesno(
+                "English list", f"That's a list of {len(rows)} English terms. Translate them to Japanese now?"):
+            self.on_translate(from_table=True)
 
-    def on_translate(self):
-        terms = split_terms(self.english_text.get("1.0", "end-1c"))
+    def on_translate(self, from_table: bool = False):
+        terms = [] if from_table else split_english_terms(self.english_text.get("1.0", "end-1c"))
         if terms:
             def done(found):
                 rows = [r for r in found if r]

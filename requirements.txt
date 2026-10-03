@@ -16,5 +16,5 @@ google-auth==2.40.3
 # Anki deck generation
 genanki==0.13.1
 
-# Optional GUI theming — the app falls back to stock Tkinter if absent
+# Optional GUI theming — the app falls back to a built-in dark theme if absent
 ttkbootstrap==1.20.4

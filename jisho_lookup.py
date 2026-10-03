@@ -8,7 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from models import Row
-from text_utils import remove_furigana, split_meanings
+from text_utils import JP_RE, remove_furigana, split_english_terms, split_meanings
 
 JISHO_WORDS_URL = "https://jisho.org/api/v1/search/words?keyword="
 JISHO_SEARCH_URL = "https://jisho.org/search/"
@@ -93,25 +93,14 @@ def lookup(term: str, reading: str = "") -> Row:
     )
 
 
-# Matches entries like:  一般的（いっぱんてき） general, common, typical
-# …and also tolerates missing readings:  一般的  general, common
-TERM_BLOCK_RE = re.compile(r"""
-    \s*                                  # optional leading space
-    (?P<term>[^\s（）()]+)                # term (until space or bracket)
-    (?:\s*[（(](?P<reading>[^）)]+)[）)])? # optional reading in JP/ASCII parens
-    \s+                                  # at least one space
-    (?P<meaning>.+?)                     # meaning (lazy)
-    (?=                                  # stop when we see the next term…
-        \s+[^\s（）()]+(?:\s*[（(][^）)]+[）)])? # …optionally with reading…
-        \s+                              # …and a space
-      | \s*$                             # …or end of string
-    )
-""", re.VERBOSE | re.DOTALL)
-
-
-_TERM_LINE_RE = re.compile(
-    r"^(?P<term>[^\s（）()]+)\s*(?:[（(](?P<reading>[^）)]+)[）)])?\s*$"
+# A Japanese headword: any run of non-space characters containing kana or kanji,
+# optionally followed by its reading in full-width or ASCII brackets.
+_JP_CHAR = r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff々〆ヵヶ]"
+_ENTRY_RE = re.compile(
+    rf"(?P<term>[^\s（）()]*{_JP_CHAR}[^\s（）()]*)\s*(?:[（(](?P<reading>[^）)]+)[）)])?"
 )
+_TERM_LINE_RE = re.compile(rf"^{_ENTRY_RE.pattern}\s*$")
+
 
 def _parse_multiline(text: str) -> list[Row]:
     """Parse the app-export format: Term（reading）\\nmeaning\\n\\nTerm…"""
@@ -130,18 +119,33 @@ def _parse_multiline(text: str) -> list[Row]:
     return rows
 
 
-def parse_blob(text: str) -> list[Row]:
-    # Try the multi-line app-export format first (term line + meaning line per block)
-    rows = _parse_multiline(text)
-    if rows:
-        return rows
-    # Fall back to the original single-line inline format
+def _parse_inline(text: str) -> list[Row]:
+    """Parse the Jisho app's one-line export: 語（ご） word, language 岐路（きろ） forked road, crossroads
+
+    Each Japanese headword starts an entry; everything up to the next headword is
+    its meaning, so meanings may contain spaces and commas.
+    """
     flat = re.sub(r"\s+", " ", text.strip())
+    matches = list(_ENTRY_RE.finditer(flat))
     rows = []
-    for m in TERM_BLOCK_RE.finditer(flat):
-        term = m.group("term").strip()
-        reading = (m.group("reading") or "").strip()
-        meanings_raw = m.group("meaning").strip()
-        meanings = ", ".join(split_meanings(meanings_raw))
-        rows.append(Row(term=term, reading=reading, meaning=meanings))
+    for m, nxt in zip(matches, matches[1:] + [None]):
+        meaning = flat[m.end(): nxt.start() if nxt else len(flat)].strip()
+        rows.append(Row(
+            term=m.group("term"),
+            reading=(m.group("reading") or "").strip(),
+            meaning=", ".join(split_meanings(meaning)),
+        ))
     return rows
+
+
+def parse_blob(text: str) -> list[Row]:
+    """Rows from pasted text in any of the supported shapes.
+
+    - An English word list (no Japanese anywhere): one English row per term,
+      ready to translate.
+    - The multi-line app export: 語（ご）\\nmeaning\\n\\n…
+    - The Jisho app's one-line export: 語（ご） meaning 語（ご） meaning …
+    """
+    if not JP_RE.search(text):
+        return [Row(term=t) for t in split_english_terms(text)]
+    return _parse_multiline(text) or _parse_inline(text)
