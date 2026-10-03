@@ -80,6 +80,8 @@ updated deck updates the existing one instead of creating a duplicate.
 
 ## Setup
 
+Tested on Python 3.12–3.14 (Windows wheels exist for every compiled dependency).
+
 ```bash
 git clone https://github.com/Stalagmighty/Create_Custom_Japanese_Vocab_List_and_Anki_Deck.git
 cd Create_Custom_Japanese_Vocab_List_and_Anki_Deck
