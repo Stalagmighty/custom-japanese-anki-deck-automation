@@ -14,7 +14,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 MODULES = [
     "text_utils",
-    "openai_client",
+    "anthropic_client",
     "enrichment",
     "jisho_lookup",
     "sheets",

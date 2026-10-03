@@ -1,13 +1,7 @@
-import json, re, time, os
+import json, re, time
 from typing import List
-from openai import OpenAI
 
-_client = None
-def _client_once():
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    return _client
+from anthropic_client import DEFAULT_MODEL, complete_text
 
 def _extract_json_block(text: str) -> str:
     if not text:
@@ -36,7 +30,7 @@ def _chunk(seq, n):
 def translate_english_terms_batch(
     english_terms: List[str],
     *,
-    model: str = "gpt-4o-mini",
+    model: str = DEFAULT_MODEL,
     batch_size: int = 25,
     retries: int = 2,
 ) -> List[List[str]]:
@@ -47,7 +41,6 @@ def translate_english_terms_batch(
     if not terms:
         return []
 
-    client = _client_once()
     out: List[List[str]] = []
 
     sys = (
@@ -91,31 +84,12 @@ def translate_english_terms_batch(
         raw_reply = ""
         for attempt in range(retries + 1):
             try:
-                if model.startswith("gpt-5"):
-                    resp = client.responses.create(
-                        model=model,
-                        input=[
-                            {"role": "system", "content": sys},
-                            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-                        ],
-                    )
-                    raw_reply = getattr(resp, "output_text", "") or ""
-                else:
-                    resp = client.chat.completions.create(
-                        model=model,
-                        response_format={"type": "json_object"},
-                        messages=[
-                            {"role": "system", "content": "Respond ONLY with valid JSON."},
-                            {"role": "user", "content":
-                                "Produce an object {\"items\": [...]} where each element has "
-                                "term, reading, meaning, example, jlpt. "
-                                + json.dumps(user_payload, ensure_ascii=False)
-                            },
-                        ],
-                        max_tokens=1200,
-                        temperature=0.2,
-                    )
-                    raw_reply = (resp.choices[0].message.content or "").strip()
+                raw_reply = complete_text(
+                    sys,
+                    json.dumps(user_payload, ensure_ascii=False),
+                    model=model,
+                    max_tokens=8000,
+                ).strip()
 
                 # ---- Parse ----
                 block = _extract_json_block(raw_reply)
