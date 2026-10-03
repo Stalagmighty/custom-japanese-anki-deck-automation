@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -10,6 +11,11 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def get_service(sa_json_path: str):
+    if not Path(sa_json_path).is_file():
+        raise FileNotFoundError(
+            f"Service account JSON not found:\n{sa_json_path}\n\n"
+            "Put your key file in the project's secrets/ folder, or pick it with Browse…"
+        )
     creds = service_account.Credentials.from_service_account_file(sa_json_path, scopes=SCOPES)
     return build("sheets", "v4", credentials=creds)
 

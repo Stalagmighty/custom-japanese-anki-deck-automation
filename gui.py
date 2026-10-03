@@ -44,6 +44,15 @@ from topic_service import TopicGeneratorService
 from utils import merge_rows
 
 
+SECRETS_DIR = Path(__file__).resolve().parent / "secrets"
+
+
+def default_service_account_path() -> str:
+    """First *.json key in the project's gitignored secrets/ folder, else where one should go."""
+    found = sorted(SECRETS_DIR.glob("*.json"))
+    return str(found[0] if found else SECRETS_DIR / "service_account.json")
+
+
 class CollapsiblePane(ttk.Frame):
     """A simple collapsible panel with a header toggle."""
     def __init__(self, parent, title="Section", start_open=True, *args, **kwargs):
@@ -171,8 +180,7 @@ class App(tk.Tk):
         ttk.Label(top, text="Service Account JSON:").grid(row=2, column=0, sticky="w", pady=(2, 0))
         self.sa_entry = ttk.Entry(top, width=60)
         self.sa_entry.grid(row=2, column=1, columnspan=4, sticky="we", padx=(4, 4))
-        default_sa_path = r"C:/Users/Tom/OneDrive/Coding Projects/Japanese_App_BackUp_Words/.venv/Scripts/python-fs-automation-3181504752ca.json"
-        self.sa_entry.insert(0, default_sa_path)
+        self.sa_entry.insert(0, default_service_account_path())
         ttk.Button(top, text="Browse…", command=self.browse_sa).grid(row=2, column=5, sticky="w")
 
         ttk.Label(top, text="Sheet ID:").grid(row=3, column=0, sticky="w", pady=(2, 0))

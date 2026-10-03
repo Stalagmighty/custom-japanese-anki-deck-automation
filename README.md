@@ -102,7 +102,9 @@ Setting the environment variable is preferred. All three paths are gitignored,
 and no key should ever be committed.
 
 Google Sheets export additionally needs a GCP service account JSON with the
-Sheets API enabled. Point the app at it from the GUI. `*.json` is gitignored.
+Sheets API enabled. Put it in a `secrets/` folder at the project root and the
+app picks it up automatically (or choose another file with **Browse…**).
+`secrets/` and `*.json` are gitignored.
 
 ```bash
 python main.py
