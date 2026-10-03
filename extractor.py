@@ -17,10 +17,14 @@ def _get_tagger() -> Tagger:
     return _TOK
 
 # ----- helpers -----
+# Parts that can make up a compound noun: 新+幹線, 主要(形状詞)+都市, 経済+活動, 国際+化
+_NOUNISH = {"名詞", "接頭辞", "接尾辞", "形状詞"}
 _PUNCT = set("。．、，・！？!?（）()［］[]{}：；「」『』…—- \n\t\r")
 _STOP_TERMS = {
     "する","ある","いる","こと","もの","これ","それ","あれ","ため","よう",
     "さん","できる","なる","及び","また","など","ようだ","ように","そして",
+    # unidic lemmas for the auxiliary-like verbs above (する → 為る, いる → 居る, …)
+    "為る","居る","成る","有る","在る","出来る","因る",
 }
 
 def katakana_to_hiragana(s: str) -> str:
@@ -40,10 +44,16 @@ def _tok(node):
     if pos:
         pos = pos.split("-")[0]  # 名詞-普通名詞 → 名詞
 
-    reading = getattr(f, "reading", None) or getattr(f, "orth", None) or surface
-    reading = katakana_to_hiragana(reading)
+    # unidic: `kana` is the reading of the surface form, `kanaBase` of the dictionary form
+    reading = katakana_to_hiragana(getattr(f, "kana", None) or surface)
 
     return surface, lemma, pos, reading
+
+
+def _base_reading(node) -> str:
+    """Hiragana reading of the dictionary form (行わ → おこなう)."""
+    f = node.feature
+    return katakana_to_hiragana(getattr(f, "kanaBase", None) or getattr(f, "kana", None) or node.surface)
 
 
 def _score_phrase(items: List[Tuple[str, str]]) -> Tuple[str, str, float]:
@@ -63,7 +73,7 @@ def extract_candidates_from_japanese_text(
 ) -> List[Tuple[str, str]]:
     """
     Parse raw JP text and return ranked (term, reading).
-    - Words: 名詞/動詞/形容詞  (verbs/adjectives use lemma as the headword)
+    - Words: 名詞/動詞/形容詞/形状詞  (verbs/adjectives use lemma as the headword)
     - Phrases (optional): noun compounds, Adj+Noun, short n-grams
     """
     tagger = _get_tagger()
@@ -77,13 +87,14 @@ def extract_candidates_from_japanese_text(
         surf, lemma, pos, read = _tok(t)
         if surf in _PUNCT:
             continue
-        if pos in ("名詞", "動詞", "形容詞"):
-            head = lemma if pos in ("動詞", "形容詞") else surf
+        if pos in ("名詞", "動詞", "形容詞", "形状詞"):
+            inflected = pos in ("動詞", "形容詞")
+            head = lemma if inflected else surf
+            read = _base_reading(t) if inflected else read
             if head and head not in _STOP_TERMS:
                 singles.append((head, read, pos))
 
     # freq + best reading
-    from collections import Counter, defaultdict
     freq = Counter([w for w, _, _ in singles])
     readings = defaultdict(Counter)
     for w, r, _ in singles:
@@ -106,7 +117,7 @@ def extract_candidates_from_japanese_text(
         # noun compounds
         run = []
         for surf, lemma, pos, read in seq:
-            if pos == "名詞" and surf not in _PUNCT:
+            if pos in _NOUNISH and surf not in _PUNCT:
                 run.append((surf, read))
             else:
                 if len(run) >= 2:
@@ -128,7 +139,10 @@ def extract_candidates_from_japanese_text(
                 chunk = seq[i : i + n]
                 if any(s in _PUNCT for s, _, _, _ in chunk):
                     continue
-                if sum(1 for _, _, p, _ in chunk if p == "名詞") >= 2:
+                # Compounds only: 文化は地域 or 結び経済活動 aren't vocabulary
+                if not all(p in _NOUNISH for _, _, p, _ in chunk):
+                    continue
+                if any(p == "名詞" for _, _, p, _ in chunk):
                     phrase_ranked.append(_score_phrase([(s, r) for s, _, _, r in chunk]))
 
     # ---- combine & trim ----
