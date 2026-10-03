@@ -60,6 +60,9 @@ class App(tk.Tk):
         self.title("Japanese Vocab → Anki")
         self.geometry("1280x800")
         self.minsize(980, 620)
+        if self.tk.call("tk", "windowingsystem") == "win32" and (
+                self.winfo_screenwidth() < 1400 or self.winfo_screenheight() < 900):
+            self.state("zoomed")  # small or high-DPI-scaled screen: start maximised
 
         self.settings = Settings.load()
         self.rows: list[Row] = []
@@ -279,6 +282,18 @@ class App(tk.Tk):
             side=tk.LEFT, padx=6)
         self._action(tools, "Add details & examples", self.on_enrich, accent=True).pack(side=tk.LEFT, padx=6)
 
+        # Pack the bottom rows before the table: pack gives earlier widgets first claim on
+        # space, so on a short or high-DPI screen the table shrinks instead of the Export
+        # row being pushed off the window.
+        self._build_export(right)
+        self._build_editor(right)
+        under = ttk.Frame(right)
+        under.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
+        self._action(under, "Clear table", self.on_clear).pack(side=tk.RIGHT)
+        self._action(under, "Delete selected", self.on_delete_selected).pack(side=tk.RIGHT, padx=6)
+        ttk.Label(under, text="Select a row to edit it below · Delete key removes selected rows",
+                  style="Hint.TLabel").pack(side=tk.LEFT)
+
         table = ttk.Frame(right)
         table.pack(fill=tk.BOTH, expand=True)
         self.tree = ttk.Treeview(table, columns=[c[0] for c in COLUMNS], show="headings", selectmode="extended")
@@ -300,19 +315,9 @@ class App(tk.Tk):
         # ttkbootstrap builds the Treeview style when the first one is created, so set this after
         ttk.Style().configure("Treeview", rowheight=28)
 
-        under = ttk.Frame(right)
-        under.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(under, text="Select a row to edit it below · Delete key removes selected rows",
-                  style="Hint.TLabel").pack(side=tk.LEFT)
-        self._action(under, "Clear table", self.on_clear).pack(side=tk.RIGHT)
-        self._action(under, "Delete selected", self.on_delete_selected).pack(side=tk.RIGHT, padx=6)
-
-        self._build_editor(right)
-        self._build_export(right)
-
     def _build_editor(self, right):
         box = ttk.LabelFrame(right, text="Selected row", padding=8)
-        box.pack(fill=tk.X, pady=(8, 0))
+        box.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
         self.editor_fields: dict[str, tk.Widget] = {}
         singles = [("term", "Term"), ("reading", "Reading"), ("jlpt", "JLPT")]
         for col, (key, label) in enumerate(singles):
@@ -337,14 +342,15 @@ class App(tk.Tk):
 
     def _build_export(self, right):
         box = ttk.Frame(right)
-        box.pack(fill=tk.X, pady=10)
+        box.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
         ttk.Label(box, text="3  Export", style="Step.TLabel").pack(side=tk.LEFT, padx=(0, 12))
         self._action(box, "Make Anki deck…", self.on_make_anki, accent=True).pack(side=tk.LEFT)
+        # Buttons before the checkbox, so a narrow window clips the checkbox label, not them
+        self._action(box, "Save CSV…", self.on_save_csv).pack(side=tk.RIGHT)
+        self._action(box, "Write to Google Sheet", self.on_write_sheet).pack(side=tk.RIGHT, padx=6)
         self.reverse_var = tk.BooleanVar(value=self.settings.reverse_cards)
         ttk.Checkbutton(box, text="Also English → Japanese cards", variable=self.reverse_var).pack(
             side=tk.LEFT, padx=8)
-        self._action(box, "Save CSV…", self.on_save_csv).pack(side=tk.RIGHT)
-        self._action(box, "Write to Google Sheet", self.on_write_sheet).pack(side=tk.RIGHT, padx=6)
 
     # ================================================================ table + editor
 
