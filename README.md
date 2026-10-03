@@ -51,8 +51,8 @@ scripts/           standalone tools, not part of the app
 smoke_test.py      offline checks with fake Claude/Jisho/Sheets — no network, no keys
 ```
 
-The GUI uses `ttkbootstrap` for theming if it's installed and falls back to
-stock Tkinter otherwise.
+The GUI uses `ttkbootstrap`'s "darkly" theme when it's installed, and a built-in dark
+theme with the same colours otherwise (the activity log says why it fell back).
 
 ## Notes on a few decisions
 

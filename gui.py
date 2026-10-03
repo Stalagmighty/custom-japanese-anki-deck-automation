@@ -17,10 +17,12 @@ from tkinter import font as tkfont
 
 import genanki
 
-try:  # optional theming
+try:  # optional theming; without it the built-in dark theme below is used
     import ttkbootstrap as tb
-except Exception:
+    TB_ERROR = ""
+except Exception as e:
     tb = None
+    TB_ERROR = f"{type(e).__name__}: {e}"
 
 import pipeline
 import sheets
@@ -45,6 +47,10 @@ SOURCES = {
 }
 JP_FONTS = ("Yu Gothic UI", "Meiryo UI", "Meiryo", "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans JP")
 SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
+
+# Colours for the built-in dark theme, matched to ttkbootstrap's "darkly"
+BG, SURFACE, FIELD, BORDER = "#222222", "#303030", "#2b2b2b", "#444444"
+FG, MUTED, ACCENT, ACCENT_HOVER = "#ffffff", "#8a8a8a", "#375a7f", "#4a72a0"
 
 
 def split_terms(text: str) -> list[str]:
@@ -78,6 +84,8 @@ class App(tk.Tk):
         self.bind("<Control-l>", lambda e: self.show_log())
         self.after(100, self._drain_events)
         self.refresh_table()
+        if TB_ERROR:
+            self.log(f"ttkbootstrap couldn't be loaded ({TB_ERROR}); using the built-in dark theme.")
 
     # ================================================================ layout
 
@@ -85,7 +93,7 @@ class App(tk.Tk):
         if tb:
             tb.Style("darkly")
         else:
-            ttk.Style().theme_use("clam")
+            self._apply_dark_theme()
         families = set(tkfont.families(self))
         family = next((f for f in JP_FONTS if f in families), None)
         base = tkfont.nametofont("TkDefaultFont")
@@ -94,12 +102,54 @@ class App(tk.Tk):
         base.configure(size=10)
         for name in ("TkTextFont", "TkHeadingFont", "TkMenuFont"):
             tkfont.nametofont(name).configure(family=base.cget("family"), size=10)
+        self.option_add("*Text.font", "TkTextFont")  # tk.Text otherwise defaults to a monospace font
         style = ttk.Style()
         style.configure("Step.TLabel", font=(base.cget("family"), 13, "bold"))
         style.configure("Hint.TLabel", font=(base.cget("family"), 9))
         self._accent = "primary.TButton" if tb else "Accent.TButton"
-        if not tb:
-            style.configure("Accent.TButton", font=(base.cget("family"), 10, "bold"))
+
+    def _apply_dark_theme(self):
+        """Dark theme on top of Tk's built-in "clam", for when ttkbootstrap isn't available."""
+        style = ttk.Style()
+        style.theme_use("clam")
+        self.configure(background=BG)
+        style.configure(".", background=BG, foreground=FG, fieldbackground=FIELD, bordercolor=BORDER,
+                        lightcolor=BG, darkcolor=BG, troughcolor=FIELD, focuscolor=ACCENT,
+                        selectbackground=ACCENT, selectforeground=FG, insertcolor=FG, arrowcolor=FG)
+        style.map(".", foreground=[("disabled", MUTED)])
+        style.configure("TButton", background=SURFACE, bordercolor=BORDER, padding=(8, 4))
+        style.map("TButton", background=[("disabled", BG), ("pressed", BORDER), ("active", BORDER)])
+        style.configure("Accent.TButton", background=ACCENT, bordercolor=ACCENT)
+        style.map("Accent.TButton", background=[("disabled", BG), ("pressed", ACCENT), ("active", ACCENT_HOVER)])
+        for widget in ("TEntry", "TSpinbox", "TCombobox"):
+            style.configure(widget, fieldbackground=FIELD, foreground=FG, insertcolor=FG)
+        style.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", FG)],
+                  selectbackground=[("readonly", FIELD)])
+        style.configure("TCheckbutton", indicatorbackground=FIELD, indicatorforeground=FG)
+        style.map("TCheckbutton", indicatorbackground=[("selected", ACCENT)], background=[("active", BG)])
+        style.configure("TNotebook", background=BG, bordercolor=BORDER)
+        style.configure("TNotebook.Tab", background=SURFACE, foreground=FG, padding=(10, 4))
+        style.map("TNotebook.Tab", background=[("selected", ACCENT), ("active", BORDER)])
+        style.configure("TLabelframe", background=BG, bordercolor=BORDER)
+        style.configure("TLabelframe.Label", background=BG, foreground=FG)
+        style.configure("Treeview", background=FIELD, fieldbackground=FIELD, foreground=FG, bordercolor=BORDER)
+        style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", FG)])
+        style.configure("Treeview.Heading", background=SURFACE, foreground=FG, bordercolor=BORDER)
+        style.map("Treeview.Heading", background=[("active", BORDER)])
+        style.configure("TProgressbar", background=ACCENT, troughcolor=FIELD, bordercolor=BORDER)
+        style.configure("TScrollbar", background=SURFACE, troughcolor=BG, bordercolor=BG)
+        style.map("TScrollbar", background=[("active", BORDER)])
+        style.configure("TPanedwindow", background=BG)
+        # Classic Tk widgets (text boxes, menus, dropdown lists, dialogs) read the option database
+        for pattern, value in [
+            ("*Text.background", FIELD), ("*Text.foreground", FG), ("*Text.insertBackground", FG),
+            ("*Text.selectBackground", ACCENT), ("*Text.highlightBackground", BORDER),
+            ("*Text.highlightColor", ACCENT), ("*Menu.background", SURFACE), ("*Menu.foreground", FG),
+            ("*Menu.activeBackground", ACCENT), ("*Menu.activeForeground", FG),
+            ("*TCombobox*Listbox.background", FIELD), ("*TCombobox*Listbox.foreground", FG),
+            ("*TCombobox*Listbox.selectBackground", ACCENT), ("*Toplevel.background", BG),
+        ]:
+            self.option_add(pattern, value)
 
     def _build_menu(self):
         bar = tk.Menu(self)
