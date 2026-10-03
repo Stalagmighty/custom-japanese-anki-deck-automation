@@ -19,7 +19,10 @@ MODEL_NAME = "JP Vocab v4"
 CSS = """
 .card { font-family: "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
         font-size: 22px; text-align: center; line-height: 1.5; }
-.term { font-size: 60px; font-weight: 700; }
+.front { display: flex; flex-direction: column; justify-content: center; align-items: center;
+         min-height: 70vh; }
+/* shrinks on narrow phones so words up to ~8 characters (オープンソース) stay on one line */
+.term { font-size: min(60px, 11vw); font-weight: 700; }
 .reading { font-size: 32px; margin-top: 6px; }
 .meaning { font-size: 26px; max-width: 900px; margin: 0 auto; }
 .example { font-size: 24px; margin: 18px auto 0; max-width: 900px; }
@@ -41,14 +44,14 @@ _DETAILS = """
 
 RECOGNITION = {
     "name": "Japanese → English",
-    "qfmt": '<div class="term">{{Term}}</div>',
+    "qfmt": '<div class="front"><div class="term">{{Term}}</div></div>',
     "afmt": '<div class="term">{{Term}}</div>' + _DETAILS,
 }
 # Only generated for notes whose Reverse field is filled in (Anki skips cards
 # whose front renders empty).
 PRODUCTION = {
     "name": "English → Japanese",
-    "qfmt": '{{#Reverse}}<div class="meaning">{{Meaning}}</div>{{/Reverse}}',
+    "qfmt": '{{#Reverse}}<div class="front"><div class="meaning">{{Meaning}}</div></div>{{/Reverse}}',
     "afmt": '<div class="meaning">{{Meaning}}</div><hr><div class="term">{{Term}}</div>' + _DETAILS,
 }
 
