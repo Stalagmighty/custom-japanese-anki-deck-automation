@@ -7,6 +7,8 @@ from pathlib import Path
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+from models import STORAGE_HEADERS, Row
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
@@ -30,53 +32,27 @@ def ensure_sheet_exists(service, spreadsheet_id: str, title: str):
     ).execute()
 
 
-def write_to_sheet(service, sheet_id: str, tab: str, rows: list,
-                   write_headers=True, clear_body=True):
-    """Write headers and rows; adapts to 3 or 5 columns based on data."""
+def write_to_sheet(service, sheet_id: str, tab: str, rows: list[Row]):
+    """Replace the tab's contents with a header row plus `rows`."""
+    ensure_sheet_exists(service, sheet_id, tab)
     values_api = service.spreadsheets().values()
-    width = max(len(r) for r in rows) if rows else 3
-    if width >= 5:
-        headers = ["Term", "Reading", "Meaning", "Example", "JLPT"]
-        header_range = f"{tab}!A1:E1"
-        clear_range = f"{tab}!A2:E"
-        write_start = f"{tab}!A2"
-    else:
-        headers = ["Term", "Reading", "Meaning"]
-        header_range = f"{tab}!A1:C1"
-        clear_range = f"{tab}!A2:C"
-        write_start = f"{tab}!A2"
-
-    if write_headers:
-        values_api.update(
-            spreadsheetId=sheet_id,
-            range=header_range,
-            valueInputOption="USER_ENTERED",
-            body={"values": [headers]},
-        ).execute()
-    if clear_body:
-        values_api.clear(spreadsheetId=sheet_id, range=clear_range).execute()
-    if rows:
-        padded = [(r + ["", "", ""])[:len(headers)] for r in rows]
-        values_api.update(
-            spreadsheetId=sheet_id,
-            range=write_start,
-            valueInputOption="USER_ENTERED",
-            body={"values": padded},
-        ).execute()
+    values_api.clear(spreadsheetId=sheet_id, range=f"{tab}!A:F").execute()
+    values_api.update(
+        spreadsheetId=sheet_id,
+        range=f"{tab}!A1",
+        valueInputOption="RAW",
+        body={"values": [STORAGE_HEADERS] + [r.to_list() for r in rows]},
+    ).execute()
 
 
-def read_from_sheet(service, sheet_id: str, tab: str) -> list:
-    """Read Term/Reading/Meaning rows (columns A:E) from a sheet."""
+def read_from_sheet(service, sheet_id: str, tab: str) -> list[Row]:
+    """Read rows (columns A:F, header row skipped). Older 5-column sheets read fine."""
     values = service.spreadsheets().values().get(
         spreadsheetId=sheet_id,
-        range=f"{tab}!A:E",
+        range=f"{tab}!A:F",
     ).execute().get("values", [])
-    rows = []
-    for r in values[1:]:  # drop header row
-        padded = (r + ["", "", ""])[:5]
-        if any(c.strip() for c in padded):
-            rows.append(padded)
-    return rows
+    rows = [Row.from_list(r) for r in values[1:]]
+    return [r for r in rows if not r.is_empty]
 
 
 def backup_raw(service, sheet_id: str, backup_tab: str, raw_text: str):

@@ -1,15 +1,13 @@
-"""Anthropic (Claude) client resolution, a single text-completion helper, and
-response parsing.
+"""Anthropic (Claude) client resolution and the one call the app makes to Claude.
 
 The key is resolved environment-first so that no credential needs to live in
 the working tree. See README for the full lookup order.
 """
 from __future__ import annotations
 
+import json
 import os
-import re
 from pathlib import Path
-from typing import Iterable
 
 import anthropic
 
@@ -70,70 +68,47 @@ def get_anthropic_client() -> anthropic.Anthropic:
     return _client
 
 
-def complete_text(
+class ClaudeError(RuntimeError):
+    """Claude returned something the app can't use (declined, truncated, unparseable)."""
+
+
+def generate_json(
     system: str,
-    user: str,
+    payload: dict,
+    schema: dict,
     *,
     model: str = DEFAULT_MODEL,
     max_tokens: int = 16000,
     effort: str = "low",
     client: anthropic.Anthropic | None = None,
-) -> str:
-    """Single Claude call; returns the concatenated text of the reply.
+) -> dict:
+    """Send `payload` (as JSON) and return Claude's reply parsed against `schema`.
 
-    max_tokens also covers any adaptive thinking, so keep it generous.
-    Sonnet 5.5 rejects non-default sampling params, so temperature is not
-    exposed. ``fallbacks="default"`` lets the API re-run a safety-declined
-    request on a fallback model instead of returning nothing.
+    Structured outputs guarantee the reply is valid JSON matching the schema, so
+    there is no lenient parsing or retry-on-bad-JSON here. max_tokens also covers
+    adaptive thinking, so keep it generous. ``fallbacks="default"`` lets the API
+    re-run a safety-declined request on a fallback model instead of failing.
     """
     client = client or get_anthropic_client()
     resp = client.beta.messages.create(
         model=model,
         max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": user}],
-        output_config={"effort": effort},
+        messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+        output_config={
+            "effort": effort,
+            "format": {"type": "json_schema", "schema": schema},
+        },
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
     )
     if resp.stop_reason == "refusal":
         category = getattr(getattr(resp, "stop_details", None), "category", None)
-        raise RuntimeError(f"Claude declined the request (category: {category})")
-    return "".join(b.text for b in resp.content if b.type == "text")
-
-
-def _extract_json(text: str) -> str:
-    """
-    Try to pull a JSON array/object from a reply that might contain extra text
-    or be wrapped in ```json code fences.
-    """
-    if not text:
-        return "[]"
-    # Pull fenced ```json blocks first
-    m = re.search(r"```json\s*(.+?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    # Otherwise try to find first JSON-looking segment
-    start = text.find("[")
-    if start != -1:
-        end = text.rfind("]")
-        if end != -1 and end > start:
-            return text[start:end + 1]
-    start = text.find("{")
-    if start != -1:
-        end = text.rfind("}")
-        if end != -1 and end > start:
-            return text[start:end + 1]
-    return text.strip()
-
-
-def _chunked(seq: Iterable, n: int):
-    """Yield lists of size n from seq."""
-    buf = []
-    for x in seq:
-        buf.append(x)
-        if len(buf) >= n:
-            yield buf
-            buf = []
-    if buf:
-        yield buf
+        raise ClaudeError(f"Claude declined the request (category: {category}).")
+    if resp.stop_reason == "max_tokens":
+        raise ClaudeError("Claude's reply was cut off (max_tokens). Try a smaller batch.")
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ClaudeError(f"Claude's reply wasn't valid JSON: {e}") from e

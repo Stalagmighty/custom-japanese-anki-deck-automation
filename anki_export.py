@@ -6,9 +6,53 @@ an updated deck updates the existing one instead of creating a duplicate.
 from __future__ import annotations
 
 import hashlib
+import html
 from datetime import datetime
 
 import genanki
+
+from models import Row
+
+MODEL_NAME = "JP Vocab v4"
+
+# Colours are left to Anki so cards read correctly in both light and night mode.
+CSS = """
+.card { font-family: "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+        font-size: 22px; text-align: center; line-height: 1.5; }
+.term { font-size: 60px; font-weight: 700; }
+.reading { font-size: 32px; margin-top: 6px; }
+.meaning { font-size: 26px; max-width: 900px; margin: 0 auto; }
+.example { font-size: 24px; margin: 18px auto 0; max-width: 900px; }
+.example-en, .meta { opacity: 0.7; }
+.example-en { font-size: 18px; margin: 6px auto 0; max-width: 900px; }
+.meta { font-size: 14px; margin-top: 16px; }
+hr { margin: 16px 0; }
+"""
+
+_DETAILS = """
+<div class="reading">{{Reading}}</div>
+{{#Reading}}{{tts ja_JP:Reading}}{{/Reading}}{{^Reading}}{{tts ja_JP:Term}}{{/Reading}}
+<hr>
+<div class="meaning">{{Meaning}}</div>
+{{#Example}}<div class="example">{{Example}}</div>{{/Example}}
+{{#ExampleEN}}<div class="example-en">{{ExampleEN}}</div>{{/ExampleEN}}
+<div class="meta">{{#JLPT}}JLPT {{JLPT}} · {{/JLPT}}Added {{Date}}</div>
+"""
+
+RECOGNITION = {
+    "name": "Japanese → English",
+    "qfmt": '<div class="term">{{Term}}</div>',
+    "afmt": '<div class="term">{{Term}}</div>' + _DETAILS,
+}
+# Only generated for notes whose Reverse field is filled in (Anki skips cards
+# whose front renders empty).
+PRODUCTION = {
+    "name": "English → Japanese",
+    "qfmt": '{{#Reverse}}<div class="meaning">{{Meaning}}</div>{{/Reverse}}',
+    "afmt": '<div class="meaning">{{Meaning}}</div><hr><div class="term">{{Term}}</div>' + _DETAILS,
+}
+
+FIELDS = ["Term", "Reading", "Meaning", "Example", "ExampleEN", "JLPT", "Date", "Reverse"]
 
 
 def stable_id(name: str) -> int:
@@ -16,72 +60,40 @@ def stable_id(name: str) -> int:
     return int(hashlib.sha1(name.encode("utf-8")).hexdigest()[:8], 16)
 
 
-def make_anki_deck(rows: list, deck_name: str):
-    """
-    Build a genanki.Deck from rows = [[Term, Reading, Meaning, Example, JLPT], ...].
-    Uses a model with 6 fields: Term, Reading, Meaning, Example, JLPT, Date.
-    """
-    deck_id = stable_id(deck_name)
-    model_name = "JP Vocab Basic v3"
-    model_id = stable_id(model_name)
+def highlight_term(example: str, term: str) -> str:
+    """HTML-escape the sentence and bold the first occurrence of the term."""
+    ex, t = html.escape(example), html.escape(term)
+    return ex.replace(t, f"<b>{t}</b>", 1) if t else ex
 
+
+def make_anki_deck(rows: list[Row], deck_name: str, *, reverse_cards: bool = False) -> genanki.Deck:
     model = genanki.Model(
-        model_id=model_id,
-        name=model_name,
-        fields=[
-            {"name": "Term"},
-            {"name": "Reading"},
-            {"name": "Meaning"},
-            {"name": "Example"},
-            {"name": "JLPT"},
-            {"name": "Date"},
-        ],
-        templates=[
-            {
-                "name": "Card 1",
-                "qfmt": """
-<div style="display:flex;align-items:center;justify-content:center;min-height:65vh;font-size:60px;font-weight:700;">
-  {{Term}}
-</div>
-                """,
-                "afmt": """
-<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:65vh;padding:10px;color:#fff !important;">
-  <div style="font-size:60px;font-weight:700;">{{Term}}</div>
-  <div style="font-size:34px;margin-top:10px;">{{Reading}}</div>
-  <hr style="width:100%;border:none;border-top:1px solid #aaa;margin:16px 0;">
-  <div style="font-size:28px;line-height:1.4;text-align:center;max-width:900px;">
-    {{Meaning}}
-  </div>
-  {{#Example}}
-  <div style="margin-top:16px;font-size:24px;line-height:1.4;text-align:center;max-width:900px;">
-    <b>Example:</b> {{Example}}
-  </div>
-  {{/Example}}
-  {{#JLPT}}
-  <div style="margin-top:12px;font-size:18px;color:#ddd;">
-    JLPT: {{JLPT}}
-  </div>
-  {{/JLPT}}
-  <div style="font-size:14px;color:#eaeaea;margin-top:16px;">
-    Added: {{Date}}
-  </div>
-</div>
-"""
-            }
-        ],
+        model_id=stable_id(MODEL_NAME),
+        name=MODEL_NAME,
+        fields=[{"name": f} for f in FIELDS],
+        templates=[RECOGNITION, PRODUCTION],
+        css=CSS,
     )
-
-    deck = genanki.Deck(deck_id=deck_id, name=deck_name)
+    deck = genanki.Deck(deck_id=stable_id(deck_name), name=deck_name)
     today = datetime.today().strftime("%Y-%m-%d")
 
     for row in rows:
-        term, reading, meaning, example, jlpt = (row + ["", "", ""])[:5]
-        guid = genanki.guid_for(f"v3|{term}|{reading}")  # version tag to avoid collision
+        if not row.term:
+            continue
         note = genanki.Note(
             model=model,
-            fields=[term, reading, meaning, example, jlpt, today],
-            guid=guid,
+            fields=[
+                html.escape(row.term),
+                html.escape(row.reading),
+                html.escape(row.meaning),
+                highlight_term(row.example, row.term),
+                html.escape(row.example_en),
+                row.jlpt,
+                today,
+                "y" if reverse_cards else "",
+            ],
+            # Same GUID scheme as earlier versions, so re-imports update existing notes.
+            guid=genanki.guid_for(f"v3|{row.term}|{row.reading}"),
         )
         deck.add_note(note)
-
     return deck
