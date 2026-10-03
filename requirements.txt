@@ -3,8 +3,8 @@ fugashi==1.5.2
 unidic-lite==1.0.8
 
 # Dictionary lookup
-jisho-api==0.1.8
 requests==2.32.4
+beautifulsoup4==4.15.0
 
 # Enrichment
 anthropic==1.11.0

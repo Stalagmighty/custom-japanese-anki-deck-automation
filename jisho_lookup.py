@@ -2,52 +2,76 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
-from jisho_api.sentence import Sentence
-from jisho_api.word import Word
+import requests
+from bs4 import BeautifulSoup
 
 from text_utils import remove_furigana, split_meanings
 
+JISHO_WORDS_URL = "https://jisho.org/api/v1/search/words?keyword="
+JISHO_SEARCH_URL = "https://jisho.org/search/"
+TIMEOUT = 15
 
-def top_two_non_wiki_meanings(w_data) -> str:
+
+def search_words(keyword: str) -> list[dict]:
+    """Raw entries from Jisho's word-search JSON API ([] when nothing matches)."""
+    r = requests.get(JISHO_WORDS_URL + quote(keyword), timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json().get("data") or []
+
+
+def top_two_non_wiki_meanings(entry: dict) -> str:
     picked = []
-    for sense in w_data.senses:
-        if "Wikipedia definition" in (sense.parts_of_speech or []):
+    for sense in entry.get("senses") or []:
+        if "Wikipedia definition" in (sense.get("parts_of_speech") or []):
             continue
-        if sense.english_definitions:
-            picked.append(", ".join(sense.english_definitions))
+        if sense.get("english_definitions"):
+            picked.append(", ".join(sense["english_definitions"]))
         if len(picked) >= 2:
             break
     return "; ".join(picked[:2]) if picked else ""
 
 
 def fetch_example_sentence(term: str) -> str:
+    """First example sentence for `term` from Jisho's sentence search, furigana stripped.
+
+    Jisho has no sentence API, so this reads the search results page.
+    """
     try:
-        s_res = Sentence.request(term)
-        if s_res.data:
-            return remove_furigana(s_res.data[0].japanese)
+        r = requests.get(JISHO_SEARCH_URL + quote(term + " #sentences"), timeout=TIMEOUT)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.content, "html.parser")
+        block = soup.find("div", {"class": "sentence_content"})
+        if block is None:
+            return ""
+        parts = []
+        for li in block.find_all("li"):
+            unlinked = li.find("span", {"class": "unlinked"})
+            if unlinked:
+                parts.append(unlinked.text)
+        return remove_furigana("".join(parts))
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def augment_row_with_jisho(term: str, reading_hint: str | None) -> list[str]:
     """
     Returns: [Term, Reading, Meaning(2 max, non-Wikipedia), Example, JLPT]
     """
-    w_res = Word.request(term)
-    if not w_res.data and reading_hint:
-        w_res = Word.request(reading_hint)
-    if not w_res.data:
+    entries = search_words(term)
+    if not entries and reading_hint:
+        entries = search_words(reading_hint)
+    if not entries:
         return [term, reading_hint or "", "", "", ""]
 
-    w = w_res.data[0]
-    jp0 = w.japanese[0]
-    out_term = jp0.word or jp0.reading or term
-    out_reading = jp0.reading or (reading_hint or "")
+    w = entries[0]
+    jp0 = (w.get("japanese") or [{}])[0]
+    out_term = jp0.get("word") or jp0.get("reading") or term
+    out_reading = jp0.get("reading") or (reading_hint or "")
     meanings = top_two_non_wiki_meanings(w)
     example = fetch_example_sentence(term)
-    jlpt = ", ".join(w.jlpt) if w.jlpt else ""
+    jlpt = ", ".join(w.get("jlpt") or [])
 
     return [out_term, out_reading, meanings or "", example, jlpt]
 

@@ -30,7 +30,7 @@ English terms ─────┘      │                             │
 | --- | --- | --- |
 | Extract | `extractor.py` | Morphological analysis of raw Japanese via fugashi/unidic-lite — filters to nouns, verbs and adjectives, lemmatises verbs, ranks by frequency and length, and pulls out noun compounds and n-gram phrases |
 | Translate | `From_English_Translate.py` | Batch English → Japanese, for when I know the concept but not the word |
-| Look up | `jisho-api` | Dictionary readings, meanings and example sentences |
+| Look up | `jisho_lookup.py` | Dictionary readings, meanings and example sentences |
 | Tag | `topic_service.py` | Groups terms into topics so a deck can be studied thematically |
 | Store | Google Sheets API | The working table — editable on a phone, with a raw-text backup tab |
 | Export | `genanki` | A ready-to-import deck |
@@ -128,4 +128,4 @@ A personal project, not a product.
 
 ## Built with
 
-Python · Tkinter · fugashi/unidic-lite · jisho-api · Anthropic API (Claude Sonnet 5.5) · Google Sheets API · genanki
+Python · Tkinter · fugashi/unidic-lite · Jisho API · Anthropic API (Claude Sonnet 5.5) · Google Sheets API · genanki
