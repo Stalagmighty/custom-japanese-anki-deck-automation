@@ -142,6 +142,18 @@ rows = parse_blob(multiline)
 check("parse_blob multiline: count", len(rows), 2)
 check("parse_blob multiline: first row", (rows[0].term, rows[0].reading, rows[0].meaning),
       ("一般的", "いっぱんてき", "general, common"))
+jisho_export = ("副操縦士（ふくそうじゅうし） copilot 標準化（ひょうじゅんか） standardization, standardisation "
+                "岐路（きろ） forked road, crossroads すごい amazing")
+check("parse_blob Jisho export: meanings with commas and spaces stay whole",
+      [(r.term, r.reading, r.meaning) for r in parse_blob(jisho_export)],
+      [("副操縦士", "ふくそうじゅうし", "copilot"), ("標準化", "ひょうじゅんか", "standardization, standardisation"),
+       ("岐路", "きろ", "forked road, crossroads"), ("すごい", "", "amazing")])
+english_list = ("Orbit / orbital path\nLEO, MEO, GEO\nGeostationary vs geosynchronous\n"
+                "Frequency band (L-band, S-band, X-band)\nPass (A satellite passing over a ground site)\norbit")
+check("parse_blob English list: one English row per term, brackets kept whole",
+      [r.term for r in parse_blob(english_list)],
+      ["Orbit", "orbital path", "LEO", "MEO", "GEO", "Geostationary", "geosynchronous",
+       "Frequency band (L-band, S-band, X-band)", "Pass (A satellite passing over a ground site)"])
 with mock.patch("requests.get", side_effect=fake_get):
     found = jisho_lookup.lookup("地政学")
     check("lookup: reading/meaning/jlpt", (found.reading, found.meaning, found.jlpt),

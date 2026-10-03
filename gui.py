@@ -30,6 +30,7 @@ from anki_export import make_anki_deck
 from jisho_lookup import parse_blob
 from models import STORAGE_HEADERS, Row, merge_rows
 from settings import Settings
+from text_utils import split_english_terms
 
 # (Row attribute, heading, width) in display order
 COLUMNS = [
@@ -51,12 +52,6 @@ SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 # Colours for the built-in dark theme, matched to ttkbootstrap's "darkly"
 BG, SURFACE, FIELD, BORDER = "#222222", "#303030", "#2b2b2b", "#444444"
 FG, MUTED, ACCENT, ACCENT_HOVER = "#ffffff", "#8a8a8a", "#375a7f", "#4a72a0"
-
-
-def split_terms(text: str) -> list[str]:
-    """English terms from free text: one per line, or separated by , ; | or tabs."""
-    parts = (p.strip() for p in re.split(r"[\n,;\t|]+", text))
-    return [p for p in parts if p and re.search(r"[A-Za-z]", p)]
 
 
 class App(tk.Tk):
@@ -212,8 +207,8 @@ class App(tk.Tk):
 
         tab = ttk.Frame(self.inputs, padding=10)
         self.inputs.add(tab, text="Vocab list")
-        self._hint(tab, "Paste entries like 一般的（いっぱんてき） general, common — "
-                        "one per line, or an export from a vocab app.")
+        self._hint(tab, "Paste a Jisho export (一般的（いっぱんてき） general, common 岐路（きろ） "
+                        "crossroads …) or an English word list, one term per line.")
         self.list_text = self._text_box(tab)
         self._action(tab, "Add to table", self.on_parse, accent=True).pack(anchor="e")
 
@@ -498,12 +493,16 @@ class App(tk.Tk):
     def on_parse(self):
         rows = parse_blob(self.list_text.get("1.0", "end-1c"))
         if not rows:
-            messagebox.showwarning("Nothing found", "No entries found. Expected lines like: 語（ご） word")
+            messagebox.showwarning("Nothing found", "No entries found. Paste a Jisho export "
+                                   "(語（ご） word …) or an English word list.")
             return
         self._add_rows(rows, "Vocab list")
+        if all(r.is_english for r in rows) and messagebox.askyesno(
+                "English list", f"That's a list of {len(rows)} English terms. Translate them to Japanese now?"):
+            self.on_translate(from_table=True)
 
-    def on_translate(self):
-        terms = split_terms(self.english_text.get("1.0", "end-1c"))
+    def on_translate(self, from_table: bool = False):
+        terms = [] if from_table else split_english_terms(self.english_text.get("1.0", "end-1c"))
         if terms:
             def done(found):
                 rows = [r for r in found if r]

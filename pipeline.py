@@ -96,6 +96,8 @@ TRANSLATE_SYSTEM = (
     "word over a katakana loanword unless the loanword is standard. "
     + _FIELD_RULES
     + "In meaning, include the seed itself if it isn't already one of the glosses. "
+    "A seed may carry context in brackets, e.g. 'Pass (a satellite passing over a ground site)': "
+    "use it to pick the right sense, but keep it out of meaning. "
     + _EXAMPLE_RULES
     + "Return exactly one item per seed, carrying the seed's id."
 )
