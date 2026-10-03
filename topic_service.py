@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Callable, Iterable, List, Tuple, Set, Dict
 import json
 import time
-import os
-from openai import OpenAI
+
+from anthropic_client import DEFAULT_MODEL, complete_text
 import re, json
 
 
@@ -77,11 +77,10 @@ class TopicGeneratorService:
     Optionally enriches via Jisho.
     """
 
-    def __init__(self, augment_row_with_jisho=None, *, model="gpt-4o-mini", temperature=1.0, client=None):
+    def __init__(self, augment_row_with_jisho=None, *, model=DEFAULT_MODEL, client=None):
         self.augment_row_with_jisho = augment_row_with_jisho
         self.model = model
-        self.temperature = temperature
-        self.client = client or OpenAI()  # ← fine, but won’t be used if you inject
+        self.client = client  # optional injected anthropic.Anthropic; None → shared client
 
     # ---------- PUBLIC -------------------------------------------------------
     def generate_rows(
@@ -93,7 +92,7 @@ class TopicGeneratorService:
     ) -> List[List[str]]:
         """
         Returns exactly `count` rows: [term, reading, meaning, example, jlpt].
-        Avoids any (term, reading) in `existing_keys`. Will loop and ask GPT for
+        Avoids any (term, reading) in `existing_keys`. Will loop and ask Claude for
         more until we have enough uniques (with a sensible safety cap).
         """
         avoid: Set[Tuple[str, str]] = set(existing_keys or [])
@@ -109,7 +108,7 @@ class TopicGeneratorService:
             # Ask for a bit more than we still need to compensate for duplicates
             ask_for = min(remaining + 8, max(remaining + 4, 24))
 
-            batch = self._ask_gpt_for_topic_batch(
+            batch = self._ask_claude_for_topic_batch(
                 topic=topic,
                 n=ask_for,
                 avoid_pairs=list(avoid | set(collected.keys())),
@@ -133,7 +132,7 @@ class TopicGeneratorService:
         # If still short (rare), force another final pass asking for exactly the remainder
         if len(collected) < count:
             final_need = count - len(collected)
-            batch = self._ask_gpt_for_topic_batch(
+            batch = self._ask_claude_for_topic_batch(
                 topic=topic,
                 n=final_need + 10,
                 avoid_pairs=list(avoid | set(collected.keys())),
@@ -164,7 +163,7 @@ class TopicGeneratorService:
         return rows[:count]
 
     # ---------- PRIVATE ------------------------------------------------------
-    def _ask_gpt_for_topic_batch(
+    def _ask_claude_for_topic_batch(
             self,
             topic: str,
             n: int,
@@ -173,7 +172,7 @@ class TopicGeneratorService:
     ) -> List[List[str]]:
         """
         Returns a list of rows: [term, reading, meaning, example, jlpt]
-        GPT is instructed to avoid `avoid_pairs` and produce unique items.
+        Claude is instructed to avoid `avoid_pairs` and produce unique items.
         Uses lenient JSON extraction so minor format hiccups don't fail the batch.
         """
         import re, json
@@ -281,17 +280,13 @@ class TopicGeneratorService:
 
         # --- API call ----------------------------------------------------------
         try:
-            resp = self.client.chat.completions.create(
+            content = complete_text(
+                sys_prompt,
+                json.dumps(user_payload, ensure_ascii=False),
                 model=self.model,
-                temperature=self.temperature,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-                ],
-                max_tokens=1800,
-            )
-            content = resp.choices[0].message.content or "{}"
+                max_tokens=8000,
+                client=self.client,
+            ) or "{}"
         except Exception as e:
             print(f"[TopicService request error] {e}")
             return []

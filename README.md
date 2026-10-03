@@ -21,7 +21,7 @@ Raw Japanese text ─┐
 App export blob ───┼──────┤   (readings, meanings,      │   (working table,
                    │      │    example sentences)       │    reviewable)
 English terms ─────┘      │                             │
-                          └─► OpenAI                    └─► Anki deck (.apkg)
+                          └─► Claude (Anthropic)        └─► Anki deck (.apkg)
                               (example sentences,           via genanki
                                topic tagging)
 ```
@@ -40,8 +40,8 @@ English terms ─────┘      │                             │
 ```
 main.py            entry point
 gui.py             Tkinter front end — presentation and orchestration only
-  ├── openai_client.py   key resolution + response/JSON extraction
-  ├── enrichment.py      batched GPT example-sentence generation
+  ├── anthropic_client.py key resolution, Claude call helper, JSON extraction
+  ├── enrichment.py      batched Claude example-sentence generation
   ├── jisho_lookup.py    dictionary lookups + parsing pasted/exported vocab
   ├── text_utils.py      pure string helpers
   ├── sheets.py          Google Sheets read/write/backup
@@ -72,7 +72,7 @@ model for JSON and getting *nearly* JSON was the single most common failure mode
 while building this, and strict `json.loads` made the app feel broken when the
 data was actually fine.
 
-**OpenAI calls are batched** rather than one-per-term — a 200-term list is a
+**Claude calls are batched** rather than one-per-term — a 200-term list is a
 handful of requests instead of 200.
 
 **Anki deck IDs are derived from a hash of the deck name**, so re-importing an
@@ -90,11 +90,11 @@ pip install -r requirements.txt
 
 ### Credentials
 
-The OpenAI key is resolved in this order — environment variable first:
+The Anthropic key (`sk-ant-...`) is resolved in this order — environment variable first:
 
-1. `OPENAI_API_KEY` in the environment
-2. `OPENAI_API_KEY=...` in a `.env` file at the project root
-3. `OPENAI_API_KEY.txt` at the project root
+1. `ANTHROPIC_API_KEY` in the environment
+2. `ANTHROPIC_API_KEY=...` in a `.env` file at the project root
+3. `ANTHROPIC_API_KEY.txt` at the project root
 
 Setting the environment variable is preferred. All three paths are gitignored,
 and no key should ever be committed.
@@ -126,4 +126,4 @@ A personal project, not a product.
 
 ## Built with
 
-Python · Tkinter · fugashi/unidic-lite · jisho-api · OpenAI API · Google Sheets API · genanki
+Python · Tkinter · fugashi/unidic-lite · jisho-api · Anthropic API (Claude Sonnet 5.5) · Google Sheets API · genanki

@@ -33,11 +33,11 @@ except Exception:
     sv_ttk = None
 
 from anki_export import make_anki_deck
-from enrichment import generate_examples_with_gpt_batch
+from enrichment import generate_examples_with_claude_batch
 from extractor import build_rows_from_text
 from From_English_Translate import translate_english_terms_batch
 from jisho_lookup import augment_row_with_jisho, parse_blob
-from openai_client import get_openai_client
+from anthropic_client import DEFAULT_MODEL, get_anthropic_client
 from sheets import backup_raw, get_service, read_from_sheet, write_to_sheet
 from text_utils import JP_RE, remove_furigana
 from topic_service import TopicGeneratorService
@@ -107,11 +107,11 @@ class App(tk.Tk):
         controls_frame.pack(fill="x", padx=10, pady=6)
 
         # Topic service (reused)
-        client = get_openai_client()  # ensures the key is loaded from file or env
+        client = get_anthropic_client()  # ensures the key is loaded from file or env
         self.topic_service = TopicGeneratorService(
             augment_row_with_jisho=augment_row_with_jisho,
             client=client,  # inject the working client
-            model="gpt-4o-mini",
+            model=DEFAULT_MODEL,
         )
 
         # Theming
@@ -145,7 +145,7 @@ class App(tk.Tk):
         ttk.Spinbox(controls_frame, from_=5, to=200, textvariable=self.topic_count_var, width=6).grid(
             row=0, column=3, padx=4, pady=4
         )
-        ttk.Checkbutton(controls_frame, text="GPT only", variable=self.gpt_only_var).grid(row=0, column=4, padx=6)
+        ttk.Checkbutton(controls_frame, text="Claude only", variable=self.gpt_only_var).grid(row=0, column=4, padx=6)
         ttk.Button(controls_frame, text="Generate from Topic", command=self.on_generate_from_topic).grid(
             row=0, column=5, padx=6
         )
@@ -224,10 +224,10 @@ class App(tk.Tk):
         ttk.Radiobutton(mode_row, text="Jisho only", variable=self.source_mode, value=0).grid(
             row=0, column=0, padx=8, pady=6, sticky="w"
         )
-        ttk.Radiobutton(mode_row, text="GPT only", variable=self.source_mode, value=1).grid(
+        ttk.Radiobutton(mode_row, text="Claude only", variable=self.source_mode, value=1).grid(
             row=0, column=1, padx=8, pady=6, sticky="w"
         )
-        ttk.Radiobutton(mode_row, text="Jisho → GPT", variable=self.source_mode, value=2).grid(
+        ttk.Radiobutton(mode_row, text="Jisho → Claude", variable=self.source_mode, value=2).grid(
             row=0, column=2, padx=8, pady=6, sticky="w"
         )
 
@@ -495,10 +495,10 @@ class App(tk.Tk):
 
                 self._safe_after(0, self.refresh_table)  # <— refresh table after Jisho pass
 
-            # Reset bar before GPT pass
+            # Reset bar before Claude pass
             self._safe_after(0, self._set_pb, self.enrich_pb, 0, 1)
 
-            # -------- PASS 2: GPT (BATCHED) --------
+            # -------- PASS 2: Claude (BATCHED) --------
             if mode in (1, 2) and not self._closing:
                 need_idxs: List[int] = []
                 need_terms: List[str] = []
@@ -531,20 +531,20 @@ class App(tk.Tk):
 
                 need_total = len(need_idxs)
                 done = 0
-                self._safe_after(0, self.log, f"GPT pass starting… ({need_total} rows need examples)")
+                self._safe_after(0, self.log, f"Claude pass starting… ({need_total} rows need examples)")
                 self._safe_after(0, self._set_pb, self.enrich_pb, 0, max(1, need_total))
 
                 if need_total > 0 and not self._closing:
                     try:
-                        term_to_example = generate_examples_with_gpt_batch(
+                        term_to_example = generate_examples_with_claude_batch(
                             need_terms,
-                            model="gpt-4o-mini",
+                            model=DEFAULT_MODEL,
                             batch_size=20,
-                            max_tokens_per_batch=2000,  # ✅ correct kwarg
+                            max_tokens_per_batch=8000,
                         )
 
                     except Exception as e:
-                        self._safe_after(0, self.log, f"[GPT batch] failed: {e}", False)
+                        self._safe_after(0, self.log, f"[Claude batch] failed: {e}", False)
                         term_to_example = {}
 
                     # Build ordered fallback to handle term key drift
@@ -555,7 +555,7 @@ class App(tk.Tk):
                         )
 
                     if need_total > 0 and not self._closing and not term_to_example:
-                        self._safe_after(0, self.log, "[GPT batch] returned no usable items.", False)
+                        self._safe_after(0, self.log, "[Claude batch] returned no usable items.", False)
 
                     # Write back
                     for j, (idx, term) in enumerate(zip(need_idxs, need_terms)):
@@ -570,7 +570,7 @@ class App(tk.Tk):
                             self.rows[idx] = row
                             gpt_updates += 1
                             preview = (ex[:18] + "…") if len(ex) > 20 else ex
-                            self._safe_after(0, self.log, f"GPT wrote: {preview}", False)
+                            self._safe_after(0, self.log, f"Claude wrote: {preview}", False)
                         done += 1
                         self._safe_after(0, self._set_pb, self.enrich_pb, done, max(1, need_total))
                         if done % 20 == 0 or done == need_total:
@@ -664,7 +664,7 @@ class App(tk.Tk):
         self.refresh_table()
         self.log(f"Extracted {len(candidates_rows)} items; appended {added}, updated {updated}.")
 
-        # optionally kick off Jisho → GPT enrichment
+        # optionally kick off Jisho → Claude enrichment
         # self.start_enrichment_worker()
 
     # ----- Self-Service Topic Generator (unique & fills to requested count) -----
@@ -803,7 +803,7 @@ class App(tk.Tk):
 
                 rows = FET.translate_english_terms_batch(
                     english_terms,
-                    model="gpt-4o-mini",
+                    model=DEFAULT_MODEL,
                     batch_size=25,
                     retries=2,
                 )
@@ -853,5 +853,5 @@ class App(tk.Tk):
             messagebox.showerror("Anki export error", str(e))
 
 if __name__ == "__main__":
-    get_openai_client()   # ensures OPENAI_API_KEY is set for TopicService / translator
+    get_anthropic_client()   # ensures ANTHROPIC_API_KEY is set for TopicService / translator
     App().mainloop()

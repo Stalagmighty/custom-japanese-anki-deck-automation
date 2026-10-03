@@ -1,20 +1,20 @@
-"""GPT-backed enrichment: natural example sentences for vocabulary terms."""
+"""Claude-backed enrichment: natural example sentences for vocabulary terms."""
 from __future__ import annotations
 
 import json
 import time
 from typing import Dict, Iterable, List
 
-from openai_client import _extract_json, get_openai_client
+from anthropic_client import DEFAULT_MODEL, _extract_json, complete_text
 from text_utils import remove_furigana
 
 
-def generate_examples_with_gpt_batch(
+def generate_examples_with_claude_batch(
     terms: List[str],
     *,
-    model: str = "gpt-4o-mini",
+    model: str = DEFAULT_MODEL,
     batch_size: int = 40,
-    max_tokens_per_batch: int = 900,   # longer sentences need a bit more room
+    max_tokens_per_batch: int = 8000,  # also covers adaptive thinking
     retries: int = 2,
 ) -> Dict[str, str]:
     """
@@ -24,7 +24,6 @@ def generate_examples_with_gpt_batch(
     if not terms:
         return {}
 
-    client = get_openai_client()
     result: Dict[str, str] = {}
 
     # Tighter, shared guidance (no English, ensure term presence, longer sentence)
@@ -34,35 +33,6 @@ def generate_examples_with_gpt_batch(
         "Target 60–110 Japanese characters (not words). Prefer context‑rich usage (news/academic/professional). "
         "Return STRICT JSON only."
     )
-
-    def _extract_text_any(resp) -> str:
-        """
-        Works for both Responses API and Chat Completions.
-        Tries: .output_text → responses.output[].content[].text.value → choices[0].message.content
-        """
-        # 1) New SDK convenience
-        t = getattr(resp, "output_text", None)
-        if t:
-            return t
-
-        # 2) Responses API canonical path
-        try:
-            out_chunks = []
-            for item in getattr(resp, "output", []) or []:
-                for c in getattr(item, "content", []) or []:
-                    tv = getattr(getattr(c, "text", None), "value", None)
-                    if tv:
-                        out_chunks.append(tv)
-            if out_chunks:
-                return "".join(out_chunks)
-        except Exception:
-            pass
-
-        # 3) Chat Completions
-        try:
-            return resp.choices[0].message.content or ""
-        except Exception:
-            return ""
 
     def _chunked(seq: Iterable, n: int):
         buf = []
@@ -87,37 +57,12 @@ def generate_examples_with_gpt_batch(
         raw_reply = ""
         for attempt in range(retries + 1):
             try:
-                if model.startswith("gpt-5"):
-                    # Responses API (token arg name differs by SDK version).
-                    try:
-                        resp = client.responses.create(
-                            model=model,
-                            input=[
-                                {"role": "system", "content": sys_prompt},
-                                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                            ],
-                            max_output_tokens=max_tokens_per_batch,
-                        )
-                    except TypeError:
-                        resp = client.responses.create(
-                            model=model,
-                            input=[
-                                {"role": "system", "content": sys_prompt},
-                                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                            ],
-                        )
-                else:
-                    # Chat Completions
-                    resp = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": sys_prompt},
-                            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                        ],
-                        max_tokens=max_tokens_per_batch,
-                    )
-
-                raw_reply = _extract_text_any(resp)  # <-- capture reply text
+                raw_reply = complete_text(
+                    sys_prompt,
+                    json.dumps(payload, ensure_ascii=False),
+                    model=model,
+                    max_tokens=max_tokens_per_batch,
+                )
                 raw_json = _extract_json(raw_reply)
                 try:
                     data = json.loads(raw_json)
@@ -154,7 +99,7 @@ def generate_examples_with_gpt_batch(
         if last_err and not any(remove_furigana(t) in result for t in group):
             snippet = (raw_reply[:240] + "…") if raw_reply else ""
             # Don’t raise here — just continue so other batches still run
-            print(f"[GPT batch warn] group produced no items. reply snippet: {snippet}")
+            print(f"[Claude batch warn] group produced no items. reply snippet: {snippet}")
 
         time.sleep(0.08)
 
