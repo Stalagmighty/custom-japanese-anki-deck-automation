@@ -19,7 +19,10 @@ MODEL_NAME = "JP Vocab v4"
 CSS = """
 .card { font-family: "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
         font-size: 22px; text-align: center; line-height: 1.5; }
-.term { font-size: 60px; font-weight: 700; }
+.front { display: flex; flex-direction: column; justify-content: center; align-items: center;
+         min-height: 70vh; }
+/* shrinks on narrow phones so words up to ~8 characters (オープンソース) stay on one line */
+.term { font-size: min(60px, 11vw); font-weight: 700; }
 .reading { font-size: 32px; margin-top: 6px; }
 .meaning { font-size: 26px; max-width: 900px; margin: 0 auto; }
 .example { font-size: 24px; margin: 18px auto 0; max-width: 900px; }
@@ -27,29 +30,36 @@ CSS = """
 .example-en { font-size: 18px; margin: 6px auto 0; max-width: 900px; }
 .meta { font-size: 14px; margin-top: 16px; }
 hr { margin: 16px 0; }
+/* Answer side is tighter so the example fits without scrolling. */
+.back { line-height: 1.4; }
+.back .term { font-size: min(48px, 9vw); }
+.back .reading { font-size: 26px; margin-top: 2px; }
+.back .meaning { font-size: 22px; }
+.back .example { font-size: 20px; margin-top: 12px; }
+.back hr { margin: 10px 0; }
+.back .meta { margin-top: 10px; }
 """
 
-_DETAILS = """
-<div class="reading">{{Reading}}</div>
-{{#Reading}}{{tts ja_JP:Reading}}{{/Reading}}{{^Reading}}{{tts ja_JP:Term}}{{/Reading}}
-<hr>
-<div class="meaning">{{Meaning}}</div>
+# Reading is only ever on the answer side. JLPT is stored but not shown.
+_TERM = '<div class="term">{{Term}}</div><div class="reading">{{Reading}}</div>'
+_MEANING = '<div class="meaning">{{Meaning}}</div>'
+_EXAMPLE = """
 {{#Example}}<div class="example">{{Example}}</div>{{/Example}}
 {{#ExampleEN}}<div class="example-en">{{ExampleEN}}</div>{{/ExampleEN}}
-<div class="meta">{{#JLPT}}JLPT {{JLPT}} · {{/JLPT}}Added {{Date}}</div>
+<div class="meta">Added {{Date}}</div>
 """
 
 RECOGNITION = {
     "name": "Japanese → English",
-    "qfmt": '<div class="term">{{Term}}</div>',
-    "afmt": '<div class="term">{{Term}}</div>' + _DETAILS,
+    "qfmt": '<div class="front"><div class="term">{{Term}}</div></div>',
+    "afmt": f'<div class="back">{_TERM}<hr>{_MEANING}{_EXAMPLE}</div>',
 }
 # Only generated for notes whose Reverse field is filled in (Anki skips cards
 # whose front renders empty).
 PRODUCTION = {
     "name": "English → Japanese",
-    "qfmt": '{{#Reverse}}<div class="meaning">{{Meaning}}</div>{{/Reverse}}',
-    "afmt": '<div class="meaning">{{Meaning}}</div><hr><div class="term">{{Term}}</div>' + _DETAILS,
+    "qfmt": '{{#Reverse}}<div class="front"><div class="meaning">{{Meaning}}</div></div>{{/Reverse}}',
+    "afmt": f'<div class="back">{_MEANING}<hr>{_TERM}{_EXAMPLE}</div>',
 }
 
 FIELDS = ["Term", "Reading", "Meaning", "Example", "ExampleEN", "JLPT", "Date", "Reverse"]
@@ -66,6 +76,20 @@ def highlight_term(example: str, term: str) -> str:
     return ex.replace(t, f"<b>{t}</b>", 1) if t else ex
 
 
+def note_fields(row: Row, date: str, reverse_cards: bool) -> dict[str, str]:
+    """Field values for one note, keyed by FIELDS. Shared by the .apkg and AnkiConnect paths."""
+    return {
+        "Term": html.escape(row.term),
+        "Reading": html.escape(row.reading),
+        "Meaning": html.escape(row.meaning),
+        "Example": highlight_term(row.example, row.term),
+        "ExampleEN": html.escape(row.example_en),
+        "JLPT": row.jlpt,
+        "Date": date,
+        "Reverse": "y" if reverse_cards else "",
+    }
+
+
 def make_anki_deck(rows: list[Row], deck_name: str, *, reverse_cards: bool = False) -> genanki.Deck:
     model = genanki.Model(
         model_id=stable_id(MODEL_NAME),
@@ -80,18 +104,10 @@ def make_anki_deck(rows: list[Row], deck_name: str, *, reverse_cards: bool = Fal
     for row in rows:
         if not row.term:
             continue
+        values = note_fields(row, today, reverse_cards)
         note = genanki.Note(
             model=model,
-            fields=[
-                html.escape(row.term),
-                html.escape(row.reading),
-                html.escape(row.meaning),
-                highlight_term(row.example, row.term),
-                html.escape(row.example_en),
-                row.jlpt,
-                today,
-                "y" if reverse_cards else "",
-            ],
+            fields=[values[f] for f in FIELDS],
             # Same GUID scheme as earlier versions, so re-imports update existing notes.
             guid=genanki.guid_for(f"v3|{row.term}|{row.reading}"),
         )

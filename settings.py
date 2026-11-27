@@ -30,6 +30,7 @@ class Settings:
     example_source: str = "jisho_then_claude"
     only_fill_empty: bool = True
     reverse_cards: bool = False
+    anki_deck: str = "JP Vocab"
     append: bool = True
 
     def resolved_service_account(self) -> str:
