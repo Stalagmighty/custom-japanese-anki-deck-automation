@@ -25,6 +25,7 @@ MODULES = [
     "pipeline",
     "sheets",
     "anki_export",
+    "anki_connect",
     "gui",
     "main",
 ]
@@ -235,6 +236,110 @@ check("no reverse card unless asked", len(deck.notes[0].cards), 1)
 deck = make_anki_deck([Row("語", "ご", "word")], "Smoke Test Deck", reverse_cards=True)
 check("reverse cards when asked", len(deck.notes[0].cards), 2)
 check("card text isn't forced white", "#fff" in deck.notes[0].model.css, False)
+model = deck.notes[0].model
+check("no audio on cards", any("tts" in t["afmt"] for t in model.templates), False)
+check("no reading on either front", any("{{Reading}}" in t["qfmt"] for t in model.templates), False)
+check("meaning shown once on each back", [t["afmt"].count("{{Meaning}}") for t in model.templates], [1, 1])
+
+
+class FakeAnki:
+    """In-memory AnkiConnect: just enough of the API for send_rows."""
+
+    def __init__(self, notes=None, models=None):
+        self.models = models if models is not None else {}
+        self.notes = notes or {}  # id -> {"fields": {...}, "deck": str}
+        self.decks, self.calls = set(), []
+
+    def invoke(self, action, url=None, timeout=None, **p):
+        self.calls.append(action)
+        if action == "multi":
+            return [{"result": self.invoke(a["action"], **a["params"]), "error": None} for a in p["actions"]]
+        if action == "version":
+            return 6
+        if action == "modelNames":
+            return list(self.models)
+        if action == "createModel":
+            self.models[p["modelName"]] = {"fields": p["inOrderFields"], "templates": p["cardTemplates"]}
+            return {}
+        if action == "modelFieldNames":
+            return self.models[p["modelName"]]["fields"]
+        if action in ("updateModelTemplates", "updateModelStyling"):
+            self.models[p["model"]["name"]][action] = p["model"]
+            return None
+        if action == "createDeck":
+            self.decks.add(p["deck"])
+            return 1
+        if action == "findNotes":
+            return list(self.notes)
+        if action == "notesInfo":
+            return [{"noteId": i, "fields": {k: {"value": v} for k, v in self.notes[i]["fields"].items()}}
+                    for i in p["notes"]]
+        if action == "updateNoteFields":
+            self.notes[p["note"]["id"]]["fields"].update(p["note"]["fields"])
+            return None
+        if action == "addNotes":
+            ids = []
+            for n in p["notes"]:
+                i = 1000 + len(self.notes)
+                self.notes[i] = {"fields": dict(n["fields"]), "deck": n["deckName"]}
+                ids.append(i)
+            return ids
+        raise AssertionError(f"unexpected action {action}")
+
+
+import anki_connect
+from anki_export import FIELDS, MODEL_NAME
+
+print("\nanki_connect (fake Anki):")
+fake = FakeAnki()
+with mock.patch.object(anki_connect, "invoke", fake.invoke):
+    res = anki_connect.send_rows([Row("語", "ご", "word", "例文の語です。"), Row("", "x", "no term"),
+                                  Row("語", "ご", "dup in list")], "Vocab")
+check("send: creates the note type", MODEL_NAME in fake.models, True)
+check("send: creates the deck", fake.decks, {"Vocab"})
+check("send: adds one note, skips blank, ignores dup", (res.added, res.updated, res.skipped), (1, 0, 1))
+check("send: fields match the .apkg export", list(next(iter(fake.notes.values()))["fields"]), FIELDS)
+check("send: term is bolded in the example", next(iter(fake.notes.values()))["fields"]["Example"],
+      "例文の<b>語</b>です。")
+
+old = {7: {"deck": "Old", "fields": {"Term": "猫", "Reading": "ねこ", "Meaning": "cat", "Example": "猫だ。",
+                                     "ExampleEN": "", "JLPT": "N5", "Date": "2025-01-01", "Reverse": ""}}}
+fake = FakeAnki(notes=old, models={MODEL_NAME: {"fields": FIELDS}})
+with mock.patch.object(anki_connect, "invoke", fake.invoke):
+    res = anki_connect.send_rows([Row("猫", "ねこ", "cat; feline", "", "", "It's a cat.")], "Vocab")
+note = fake.notes[7]["fields"]
+check("send: existing word is updated, not added", (res.added, res.updated, len(fake.notes)), (0, 1, 1))
+check("send: update fills and overwrites", (note["Meaning"], note["ExampleEN"]), ("cat; feline", "It&#x27;s a cat."))
+check("send: update keeps fields the row has empty", (note["Example"], note["JLPT"]), ("猫だ。", "N5"))
+check("send: update keeps the original date", note["Date"], "2025-01-01")
+check("send: existing note type gets new templates", "updateModelTemplates" in fake.models[MODEL_NAME], True)
+check("send: summary", res.summary("Vocab"), "Sent to Anki: 0 added to “Vocab”, 1 updated.")
+
+fake = FakeAnki(models={MODEL_NAME: {"fields": ["Term", "Reading"]}})
+with mock.patch.object(anki_connect, "invoke", fake.invoke):
+    try:
+        anki_connect.send_rows([Row("語", "ご", "word")], "Vocab")
+        err = ""
+    except anki_connect.AnkiConnectError as e:
+        err = str(e)
+check("send: clear error if the note type's fields differ", "missing these fields" in err, True)
+
+try:
+    anki_connect.invoke("version", url="http://127.0.0.1:9", timeout=2)
+    err = ""
+except anki_connect.AnkiConnectError as e:
+    err = str(e)
+check("send: friendly error when Anki isn't open", err.startswith("Couldn't reach Anki"), True)
+
+
+def only_on_8766(action, url=None, timeout=None, **p):
+    if url != "http://127.0.0.1:8766":
+        raise anki_connect.AnkiConnectError("Couldn't reach Anki.")
+    return 6
+
+
+with mock.patch.object(anki_connect, "invoke", only_on_8766):
+    check("send: falls back to Agent Connect's port", anki_connect.find_anki(), ("http://127.0.0.1:8766", 6))
 
 print("\nextractor (morphological analysis):")
 sample = "日本の文化は地域によって多様で、伝統芸能や祭りが各地で行われています。"

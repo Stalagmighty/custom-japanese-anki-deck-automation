@@ -24,6 +24,7 @@ except Exception as e:
     tb = None
     TB_ERROR = f"{type(e).__name__}: {e}"
 
+import anki_connect
 import pipeline
 import sheets
 from anki_export import make_anki_deck
@@ -344,7 +345,8 @@ class App(tk.Tk):
         box = ttk.Frame(right)
         box.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
         ttk.Label(box, text="3  Export", style="Step.TLabel").pack(side=tk.LEFT, padx=(0, 12))
-        self._action(box, "Make Anki deck…", self.on_make_anki, accent=True).pack(side=tk.LEFT)
+        self._action(box, "Send to Anki", self.on_send_to_anki, accent=True).pack(side=tk.LEFT)
+        self._action(box, "Anki file…", self.on_make_anki).pack(side=tk.LEFT, padx=(6, 0))
         # Buttons before the checkbox, so a narrow window clips the checkbox label, not them
         self._action(box, "Save CSV…", self.on_save_csv).pack(side=tk.RIGHT)
         self._action(box, "Write to Google Sheet", self.on_write_sheet).pack(side=tk.RIGHT, padx=6)
@@ -608,6 +610,33 @@ class App(tk.Tk):
                       lambda task: pipeline.enrich(rows, mode, only_empty, task), done)
 
     # ================================================================ step 3: export
+
+    def on_send_to_anki(self):
+        """Add the selected rows (or all, if none are selected) to desktop Anki via AnkiConnect."""
+        if not self.rows:
+            messagebox.showinfo("Nothing to send", "Add some words first.")
+            return
+        sel = self._selected()
+        rows = [self.rows[i] for i in sel] if sel else list(self.rows)
+        which = f"the {len(rows)} selected word{'s' if len(rows) != 1 else ''}" if sel else \
+            f"all {len(rows)} words"
+        name = simpledialog.askstring(
+            "Send to Anki", f"Send {which} to this Anki deck:\n(Anki must be open on this computer.)",
+            parent=self, initialvalue=self.settings.anki_deck)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        self.settings.anki_deck = name
+        reverse = self.reverse_var.get()
+
+        def done(result):
+            msg = result.summary(name)
+            self.set_status(msg)
+            self.log(msg)
+
+        self.run_task(f"Sending {len(rows)} words to Anki",
+                      lambda task: anki_connect.send_rows(rows, name, reverse_cards=reverse, task=task),
+                      done)
 
     def on_make_anki(self):
         if not self.rows:
